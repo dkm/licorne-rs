@@ -1,0 +1,51 @@
+[package]
+name = "licorne-rs"
+edition = "2018"
+version = "0.0.1"
+authors = ["Marc <dkm@kataplop.net>"]
+description = "Simple alarmclock that changes color depending on the time for predefined periods. It is intended for small kids before they can read the time !"
+keywords = ["arm", "cortex-m", "template"]
+categories = ["embedded", "no-std"]
+license = "GPL-3.0+"
+repository = "https://github.com/dkm/licorne-rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+debug = true
+panic = "abort"
+
+[profile.dev]
+lto = false
+codegen-units = 1
+debug = true
+panic = "abort"
+
+[dependencies]
+smart-leds = {git = "https://github.com/smart-leds-rs/smart-leds"}
+ws2812-spi = {git = "https://github.com/smart-leds-rs/ws2812-spi-rs"}
+tm4c123x-hal = {git = "https://github.com/thejpster/tm4c-hal.git", features = ["rt"]}
+ds323x = {git = "https://github.com/dkm/ds323x-rs.git"}
+
+[dependencies.nb]
+version = "0.1.2"
+
+[dependencies.embedded-hal]
+version = "0.2.3"
+features = ["unproven"]
+
+[dependencies.cortex-m]
+version = "0.6.1"
+
+[dependencies.cortex-m-rt]
+version = "0.6.10"
+
+[dependencies.cortex-m-semihosting]
+version = "0.3.5"
+
+[dependencies.panic-semihosting]
+version = "0.5.3"
+
+[dependencies.panic-halt]
+version = "0.2.0"
+

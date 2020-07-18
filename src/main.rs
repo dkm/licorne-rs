@@ -20,7 +20,7 @@ extern crate ds323x;
 use ds323x::{Ds323x, NaiveTime, Rtcc};
 
 use tm4c123x_hal::gpio::GpioExt;
-use tm4c123x_hal::gpio::{Floating, AF2, AF3};
+use tm4c123x_hal::gpio::{InterruptMode, Floating, AF2, AF3};
 use tm4c123x_hal::i2c::I2c;
 use tm4c123x_hal::sysctl::{self, SysctlExt};
 use tm4c123x_hal::time::U32Ext;
@@ -109,6 +109,16 @@ fn main() -> ! {
 
     writeln!(stdout, "conf ds3231").unwrap();
     let mut rtc = Ds323x::new_ds3231(i2c_dev);
+
+    // we'll use interrupt
+    rtc.clear_alarm1_matched_flag().unwrap();
+    rtc.use_int_sqw_output_as_interrupt().unwrap();
+    rtc.enable_alarm1_interrupts().unwrap();
+
+    // GPIO for interrupt
+    // SQW pin wired to PD6
+    let mut pd6 = portd.pd6.into_pull_up_input();
+    pd6.set_interrupt_mode(InterruptMode::EdgeFalling);
 
     let time = NaiveTime::from_hms(23, 58, 45);
     rtc.set_time(&time).unwrap();

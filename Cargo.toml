@@ -27,11 +27,15 @@ tm4c123x-hal = {git = "https://github.com/thejpster/tm4c-hal.git", features = ["
 ds323x = "0.3.1"
 nb = "0.1.2"
 cortex-m = "0.6.2"
-cortex-m-rt = "0.6.12"
+
 cortex-m-semihosting = "0.3.5"
 panic-semihosting = "0.5.3"
 panic-halt = "0.2.0"
 smart-leds = "0.3.0"
+
+[dependencies.cortex-m-rt]
+version = "0.6.12"
+features = ["device"]
 
 ## we need to keep it optimized or the SPI won't be able to keep-up and it
 ## simply does not work

@@ -9,19 +9,26 @@ extern crate cortex_m_rt;
 #[macro_use(block)]
 extern crate nb;
 
+use core::cell::{Cell, RefCell};
+use core::ops::DerefMut;
+use cortex_m::interrupt::{free, CriticalSection, Mutex};
 use cortex_m_rt::{entry, exception};
+use tm4c123x_hal::gpio::{gpiod::PD6, Input, PullUp};
 
 extern crate cortex_m_semihosting as sh;
 extern crate panic_semihosting;
 
 extern crate tm4c123x_hal;
+use tm4c123x_hal::interrupt;
+
+use tm4c123x_hal::tm4c123x;
 
 extern crate ds323x;
 use ds323x::{Ds323x, NaiveTime, Rtcc};
 
 use tm4c123x_hal::gpio::GpioExt;
-use tm4c123x_hal::gpio::{InterruptMode, Floating, AF2, AF3};
-use tm4c123x_hal::i2c::I2c;
+use tm4c123x_hal::gpio::{Floating, InterruptMode, AF2, AF3};
+use tm4c123x_hal::i2c::{Error, I2c};
 use tm4c123x_hal::sysctl::{self, SysctlExt};
 use tm4c123x_hal::time::U32Ext;
 use tm4c123x_hal::timer::*;
@@ -60,6 +67,8 @@ enum FSMState<'a> {
     InRange { range: &'a TimeRange<'a> },
     WaitNextRange { range: &'a TimeRange<'a> },
 }
+
+static GPIO_PD6: Mutex<RefCell<Option<PD6<Input<PullUp>>>>> = Mutex::new(RefCell::new(None));
 
 #[entry]
 fn main() -> ! {
@@ -112,6 +121,8 @@ fn main() -> ! {
 
     // we'll use interrupt
     rtc.clear_alarm1_matched_flag().unwrap();
+    rtc.clear_alarm1_matched_flag();
+
     rtc.use_int_sqw_output_as_interrupt().unwrap();
     rtc.enable_alarm1_interrupts().unwrap();
 
@@ -119,6 +130,10 @@ fn main() -> ! {
     // SQW pin wired to PD6
     let mut pd6 = portd.pd6.into_pull_up_input();
     pd6.set_interrupt_mode(InterruptMode::EdgeFalling);
+
+    free(|cs| {
+        GPIO_PD6.borrow(cs).replace(Some(pd6));
+    });
 
     let time = NaiveTime::from_hms(23, 58, 45);
     rtc.set_time(&time).unwrap();
@@ -171,7 +186,8 @@ fn main() -> ! {
                 stdout,
                 "Waiting for next range to activate: {}:{}",
                 range.start, range.end
-            ).unwrap();
+            )
+            .unwrap();
             rtc.set_alarm1_hms(range.start).unwrap();
             break;
         }
@@ -185,28 +201,56 @@ fn main() -> ! {
     }
 
     loop {
+        let mut irq = free(|cs| {
+            let mut pd6_ref = GPIO_PD6.borrow(cs).borrow_mut();
+            if let Some(ref mut pd6) = pd6_ref.deref_mut() {
+                pd6.get_interrupt_status()
+            } else {
+                false
+            }
+        });
+
+        if !rtc.has_alarm1_matched().unwrap() {
+            writeln!(stdout, "Delay, irq: {}", irq).unwrap();
+            continue;
+        }
+
+        free(|cs| {
+            let mut pd6_ref = GPIO_PD6.borrow(cs).borrow_mut();
+            if let Some(ref mut pd6) = pd6_ref.deref_mut() {
+                pd6.clear_interrupt()
+            }
+        });
+
+        rtc.clear_alarm1_matched_flag().unwrap();
+
+        tm4c123x::NVIC::unpend(tm4c123x_hal::tm4c123x::Interrupt::GPIOD);
+        unsafe {
+            tm4c123x::NVIC::unmask(tm4c123x_hal::tm4c123x::Interrupt::GPIOD);
+        };
+
         let time = rtc.get_time().unwrap();
-        writeln!(stdout, "Delay").unwrap();
+        writeln!(stdout, "Something is happening, irq: {}", irq).unwrap();
 
         match state {
             FSMState::Idle => (),
             FSMState::WaitNextRange { range } => {
-                if time >= range.start {
-                    writeln!(stdout, "Enter").unwrap();
-                    state = FSMState::InRange { range };
-                    data = [range.in_color; 1];
-                }
+                writeln!(stdout, "Enter").unwrap();
+                state = FSMState::InRange { range };
+                data = [range.in_color; 1];
+                writeln!(stdout, "Time: {}, Alarm :{}", time, range.end).unwrap();
+                rtc.set_alarm1_hms(range.end).unwrap();
             }
 
             FSMState::InRange { range } => {
-                if time > range.end && (range.start < range.end || time < range.start) {
-                    writeln!(stdout, "Exit").unwrap();
-                    data = [colors::GREEN; 1];
-                    if let Some(x) = range.next {
-                        state = FSMState::WaitNextRange { range: x };
-                    } else {
-                        state = FSMState::WaitNextRange { range: &first };
-                    }
+                writeln!(stdout, "Exit").unwrap();
+                data = [colors::GREEN; 1];
+                if let Some(x) = range.next {
+                    state = FSMState::WaitNextRange { range: x };
+                    rtc.set_alarm1_hms(x.start).unwrap();
+                } else {
+                    state = FSMState::WaitNextRange { range: &first };
+                    rtc.set_alarm1_hms(first.start).unwrap();
                 }
             }
         }
@@ -219,6 +263,17 @@ fn main() -> ! {
 /// The hard fault handler
 fn HardFault(ef: &cortex_m_rt::ExceptionFrame) -> ! {
     panic!("HardFault at {:#?}", ef);
+}
+
+#[interrupt]
+/// The GPIOD handler (in our case, PD6 from RTC on falling edge)
+fn GPIOD() {
+    free(|cs| {
+        let mut pd6_ref = GPIO_PD6.borrow(cs).borrow_mut();
+        if let Some(ref mut pd6) = pd6_ref.deref_mut() {
+            pd6.clear_interrupt()
+        }
+    });
 }
 
 #[exception]

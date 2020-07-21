@@ -200,37 +200,25 @@ fn main() -> ! {
         }
     }
 
-    loop {
-        let mut irq = free(|cs| {
-            let mut pd6_ref = GPIO_PD6.borrow(cs).borrow_mut();
-            if let Some(ref mut pd6) = pd6_ref.deref_mut() {
-                pd6.get_interrupt_status()
-            } else {
-                false
-            }
-        });
+    // unmask GPIOD Interrupt
+    tm4c123x::NVIC::unpend(tm4c123x_hal::tm4c123x::Interrupt::GPIOD);
+    unsafe {
+        tm4c123x::NVIC::unmask(tm4c123x_hal::tm4c123x::Interrupt::GPIOD);
+    };
 
+    loop {
         if !rtc.has_alarm1_matched().unwrap() {
-            writeln!(stdout, "Delay, irq: {}", irq).unwrap();
+            // check if an alarm has been triggered. If not, then make the core
+            // go to sleep until the next IRQ is raised.
+
+            cortex_m::asm::wfi();
             continue;
         }
 
-        free(|cs| {
-            let mut pd6_ref = GPIO_PD6.borrow(cs).borrow_mut();
-            if let Some(ref mut pd6) = pd6_ref.deref_mut() {
-                pd6.clear_interrupt()
-            }
-        });
-
         rtc.clear_alarm1_matched_flag().unwrap();
 
-        tm4c123x::NVIC::unpend(tm4c123x_hal::tm4c123x::Interrupt::GPIOD);
-        unsafe {
-            tm4c123x::NVIC::unmask(tm4c123x_hal::tm4c123x::Interrupt::GPIOD);
-        };
-
         let time = rtc.get_time().unwrap();
-        writeln!(stdout, "Something is happening, irq: {}", irq).unwrap();
+        writeln!(stdout, "Something is happening").unwrap();
 
         match state {
             FSMState::Idle => (),

@@ -9,9 +9,9 @@ extern crate cortex_m_rt;
 #[macro_use(block)]
 extern crate nb;
 
-use core::cell::{Cell, RefCell};
+use core::cell::RefCell;
 use core::ops::DerefMut;
-use cortex_m::interrupt::{free, CriticalSection, Mutex};
+use cortex_m::interrupt::{free, Mutex};
 use cortex_m_rt::{entry, exception};
 use tm4c123x_hal::gpio::{gpiod::PD6, Input, PullUp};
 
@@ -28,7 +28,7 @@ use ds323x::{Ds323x, NaiveTime, Rtcc};
 
 use tm4c123x_hal::gpio::GpioExt;
 use tm4c123x_hal::gpio::{Floating, InterruptMode, AF2, AF3};
-use tm4c123x_hal::i2c::{Error, I2c};
+use tm4c123x_hal::i2c::I2c;
 use tm4c123x_hal::sysctl::{self, SysctlExt};
 use tm4c123x_hal::time::U32Ext;
 use tm4c123x_hal::timer::*;
@@ -42,9 +42,6 @@ use smart_leds::RGB8;
 extern crate ws2812_spi;
 
 use ws2812_spi as ws2812;
-
-//use crate::ws2812::Ws2812;
-//use crate::ws2812::prerendered::Timing;
 
 use smart_leds::{colors, SmartLedsWrite};
 
@@ -121,7 +118,6 @@ fn main() -> ! {
 
     // we'll use interrupt
     rtc.clear_alarm1_matched_flag().unwrap();
-    rtc.clear_alarm1_matched_flag();
 
     rtc.use_int_sqw_output_as_interrupt().unwrap();
     rtc.enable_alarm1_interrupts().unwrap();

@@ -9,46 +9,37 @@ extern crate cortex_m_rt;
 #[macro_use(block)]
 extern crate nb;
 
-use core::cell::RefCell;
-use core::ops::DerefMut;
+extern crate cortex_m_semihosting;
+extern crate ds323x;
+extern crate panic_semihosting;
+extern crate smart_leds;
+extern crate tm4c123x_hal;
+extern crate ws2812_spi;
+
 use cortex_m::interrupt::{free, Mutex};
 use cortex_m_rt::{entry, exception};
-use tm4c123x_hal::gpio::{gpiod::PD6, Input, PullUp};
+use cortex_m_semihosting::hio;
 
-extern crate cortex_m_semihosting as sh;
-extern crate panic_semihosting;
-
-extern crate tm4c123x_hal;
-use tm4c123x_hal::interrupt;
-
-use tm4c123x_hal::tm4c123x;
-
-extern crate ds323x;
 use ds323x::{Ds323x, NaiveTime, Rtcc};
 
-use tm4c123x_hal::gpio::GpioExt;
-use tm4c123x_hal::gpio::{Floating, InterruptMode, AF2, AF3};
-use tm4c123x_hal::i2c::I2c;
-use tm4c123x_hal::sysctl::{self, SysctlExt};
-use tm4c123x_hal::time::U32Ext;
-use tm4c123x_hal::timer::*;
+use tm4c123x_hal::{
+    gpio::{gpiod::PD6, Floating, GpioExt, Input, InterruptMode, PullUp, AF2, AF3},
+    i2c::I2c,
+    interrupt,
+    spi::Spi,
+    sysctl::{self, SysctlExt},
+    time::U32Ext,
+    timer::Timer,
+    tm4c123x,
+};
 
-use core::fmt::Write;
+use core::{cell::RefCell, fmt::Write, ops::DerefMut};
 
 use hal::prelude::*;
 
-extern crate smart_leds;
-use smart_leds::RGB8;
-extern crate ws2812_spi;
+use smart_leds::{colors, SmartLedsWrite, RGB8};
 
 use ws2812_spi as ws2812;
-
-use smart_leds::{colors, SmartLedsWrite};
-
-pub use crate::hal::spi::{MODE_0, MODE_1, MODE_2, MODE_3};
-use tm4c123x_hal::spi::Spi;
-
-use sh::hio;
 
 #[derive(PartialEq)]
 struct TimeRange<'a> {

@@ -6,91 +6,34 @@ extern crate embedded_hal as hal;
 //#[macro_use]
 extern crate cortex_m_rt;
 
-#[macro_use(block)]
 extern crate nb;
 
 extern crate cortex_m_semihosting;
 extern crate ds323x;
+extern crate embedded_graphics;
 extern crate panic_semihosting;
 extern crate smart_leds;
 extern crate tm4c123x_hal;
-extern crate ws2812_spi;
-extern crate embedded_graphics;
 extern crate tm4c_hal;
+extern crate ws2812_spi;
 
-const num_conv : [&str; 60] = [
-    "0",
-    "1",
-    "2",
-    "3",
-    "4",
-    "5",
-    "6",
-    "7",
-    "8",
-    "9",
-    "10",
-    "11",
-    "12",
-    "13",
-    "14",
-    "15",
-    "16",
-    "17",
-    "18",
-    "19",
-    "20",
-    "21",
-    "22",
-    "23",
-    "24",
-    "25",
-    "26",
-    "27",
-    "28",
-    "29",
-    "30",
-    "31",
-    "32",
-    "33",
-    "34",
-    "35",
-    "36",
-    "37",
-    "38",
-    "39",
-    "40",
-    "41",
-    "42",
-    "43",
-    "44",
-    "45",
-    "46",
-    "47",
-    "48",
-    "49",
-    "50",
-    "51",
-    "52",
-    "53",
-    "54",
-    "55",
-    "56",
-    "57",
-    "58",
-    "59",
+// cheap/dumb way to convert time field to strings.
+const NUM_CONV: [&str; 60] = [
+    "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15",
+    "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31",
+    "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47",
+    "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59",
 ];
 
 use tm4c_hal::delay::Delay;
 
 use embedded_graphics::{
-    fonts::{Font24x32, Font12x16, Font6x8, Text},
-    pixelcolor::BinaryColor,
-    pixelcolor::BinaryColor::On as Black,
+    fonts::{Font24x32, Text},
     pixelcolor::BinaryColor::Off as White,
+    pixelcolor::BinaryColor::On as Black,
     prelude::*,
-    primitives::{Circle, Line, Rectangle, Triangle},
-    style::{PrimitiveStyle, TextStyle},
+    primitive_style,
+    primitives::Rectangle,
     text_style,
 };
 
@@ -104,25 +47,23 @@ use cortex_m::interrupt::{free, Mutex};
 use cortex_m_rt::{entry, exception};
 use cortex_m_semihosting::hio;
 
-use ds323x::{Ds323x, NaiveTime, Timelike, Rtcc, DayAlarm2, Alarm2Matching, Hours};
+use ds323x::{Alarm2Matching, DayAlarm2, Ds323x, Hours, NaiveTime, Rtcc, Timelike};
 use tm4c123x_hal::spi::MODE_0;
 
 use tm4c123x_hal::{
-    delay,
+    //    delay,
+    //    timer::Timer,
     gpio::{gpiod::PD6, Floating, GpioExt, Input, InterruptMode, PullUp, AF2, AF3},
     i2c::I2c,
     interrupt,
     spi::Spi,
     sysctl::{self, SysctlExt},
     time::U32Ext,
-    timer::Timer,
+
     tm4c123x,
 };
 
 use core::{cell::RefCell, fmt::Write, ops::DerefMut};
-
-use hal::prelude::*;
-use hal::spi::{FullDuplex, Phase, Polarity};
 
 use smart_leds::{colors, SmartLedsWrite, RGB8};
 
@@ -148,6 +89,7 @@ struct TimeRange<'a> {
 
     next: Option<&'a TimeRange<'a>>,
     in_color: RGB8,
+    name: &'static str,
 }
 
 enum FSMState<'a> {
@@ -159,22 +101,42 @@ enum FSMState<'a> {
 // PIN used for RTC signaling. Shared between main app and IRQ handler
 static GPIO_PD6: Mutex<RefCell<Option<PD6<Input<PullUp>>>>> = Mutex::new(RefCell::new(None));
 
+const FONT: embedded_graphics::fonts::Font24x32 = Font24x32;
+const FONT_SZ: Size = embedded_graphics::fonts::Font24x32::CHARACTER_SIZE;
+
 fn draw_text(display: &mut Display2in13, text: &str, line: u8, x: u8) {
-    let y = line as i32 * 32;
-    let x = x as i32 * 24;
+    let y = line as i32 * FONT_SZ.height as i32;
+    let x = x as i32 * FONT_SZ.width as i32;
 
     let _ = Text::new(text, Point::new(x as i32, y))
         .into_styled(text_style!(
-            font = Font24x32,
+            font = FONT,
             text_color = Black,
             background_color = White
         ))
         .draw(display);
 }
 
+fn clear_line(display: &mut Display2in13, line: u8) {
+    //    repeat = display.size().width / 24;
+
+    let style = primitive_style!(fill_color = White);
+    let line = line as i32;
+
+    let h = FONT_SZ.height as i32;
+
+    Rectangle::new(
+        Point::new(0, line * h),
+        Point::new(display.size().width as i32, (line + 1) * h),
+    )
+    .into_styled(style)
+    .draw(display)
+    .unwrap();
+}
+
 fn draw_hour(display: &mut Display2in13, time: &NaiveTime) {
-    draw_text(display, num_conv[time.hour() as usize], 0, 0);
-    draw_text(display, num_conv[time.minute() as usize], 0, 3);
+    draw_text(display, NUM_CONV[time.hour() as usize], 0, 0);
+    draw_text(display, NUM_CONV[time.minute() as usize], 0, 3);
 }
 
 #[entry]
@@ -241,12 +203,12 @@ fn main() -> ! {
     let mut epd = EPD2in13::new(&mut spi0, cs_pin, busy_pin, dc_pin, rst_pin, &mut delay).unwrap();
     writeln!(stdout, "EPD setup done").unwrap();
 
-    let text_style = TextStyle::new(Font24x32, BinaryColor::On);
     let mut display = Display2in13::default();
     display.set_rotation(DisplayRotation::Rotate90);
 
     display.clear(White).unwrap();
-    epd.update_and_display_frame(&mut spi0, &display.buffer()).unwrap();
+    epd.update_and_display_frame(&mut spi0, &display.buffer())
+        .unwrap();
 
     writeln!(stdout, "EPD cleared").unwrap();
 
@@ -255,7 +217,8 @@ fn main() -> ! {
         p.I2C0,
         (
             portb.pb2.into_af_push_pull::<AF3>(&mut portb.control), // SCL
-            portb.pb3
+            portb
+                .pb3
                 .into_af_open_drain::<AF3, Floating>(&mut portb.control),
         ), // SDA
         100.khz(),
@@ -272,6 +235,9 @@ fn main() -> ! {
     rtc.clear_alarm2_matched_flag().unwrap();
 
     rtc.use_int_sqw_output_as_interrupt().unwrap();
+
+    // alarm1 used to track events
+    // alarm2 used to refresh clock display every minute.
     rtc.enable_alarm1_interrupts().unwrap();
     rtc.enable_alarm2_interrupts().unwrap();
 
@@ -290,13 +256,11 @@ fn main() -> ! {
     let time = rtc.get_time().unwrap();
     writeln!(stdout, "Time: {} ", time).unwrap();
 
-    let text_time = "00:00";
-    let text_time_width = text_time.len() as i32 * 6;
+    draw_text(&mut display, "--:--", 0, 0);
+    draw_text(&mut display, "----", 1, 0);
 
-    draw_text(&mut display, "00:00", 0, 0);
-    draw_text(&mut display, "XXXX", 1, 0);
-
-    epd.update_and_display_frame(&mut spi0, &display.buffer()).unwrap();
+    epd.update_and_display_frame(&mut spi0, &display.buffer())
+        .unwrap();
 
     let time = rtc.get_time().unwrap();
 
@@ -341,6 +305,7 @@ fn main() -> ! {
         end: NaiveTime::from_hms(07, 10, 00),
         next: None,
         in_color: colors::RED,
+        name: "red!",
     };
 
     let m1 = TimeRange {
@@ -348,6 +313,7 @@ fn main() -> ! {
         end: NaiveTime::from_hms(07, 08, 00),
         next: Some(&m0),
         in_color: colors::PINK,
+        name: "pink!",
     };
 
     let first = TimeRange {
@@ -355,17 +321,21 @@ fn main() -> ! {
         end: NaiveTime::from_hms(07, 02, 00),
         next: Some(&m1),
         in_color: colors::BLUE,
+        name: "blue!",
     };
 
-
     //
+    writeln!(stdout, "Alarm2 set...").unwrap();
     rtc.set_alarm2_day(
         DayAlarm2 {
             day: 1,
-            hour: Hours::H24(2),
-            minute: 3,
+            hour: Hours::H24(1),
+            minute: 0,
         },
-        Alarm2Matching::OncePerMinute).unwrap();
+        Alarm2Matching::OncePerMinute,
+    )
+    .unwrap();
+    writeln!(stdout, "Alarm2 set!").unwrap();
 
     let all_ranges = [&first, &m1, &m0];
 
@@ -405,7 +375,7 @@ fn main() -> ! {
             "Next alarm is tomorrow: {}:{}",
             range.start, range.end
         )
-            .unwrap();
+        .unwrap();
         rtc.set_alarm1_hms(range.start).unwrap();
     }
 
@@ -419,10 +389,9 @@ fn main() -> ! {
     };
 
     loop {
-        if !rtc.has_alarm1_matched().unwrap() || !rtc.has_alarm2_matched().unwrap() {
+        if !rtc.has_alarm1_matched().unwrap() && !rtc.has_alarm2_matched().unwrap() {
             // check if an alarm has been triggered. If not, then make the core
             // go to sleep until the next IRQ is raised.
-
             cortex_m::asm::wfi();
             continue;
         }
@@ -430,7 +399,13 @@ fn main() -> ! {
 
         // refresh the displayed time
         if rtc.has_alarm2_matched().unwrap() {
-            writeln!(stdout, "minute is changing {} {}", time.hour(), time.minute()).unwrap();
+            writeln!(
+                stdout,
+                "minute is changing {} {}",
+                time.hour(),
+                time.minute()
+            )
+            .unwrap();
             rtc.clear_alarm2_matched_flag().unwrap();
 
             draw_hour(&mut display, &time);
@@ -446,6 +421,10 @@ fn main() -> ! {
                 FSMState::Idle => (),
                 FSMState::WaitNextRange { range } => {
                     writeln!(stdout, "Enter").unwrap();
+
+                    clear_line(&mut display, 1);
+                    draw_text(&mut display, range.name, 1, 0);
+
                     state = FSMState::InRange { range };
                     data = [range.in_color; 1];
                     writeln!(stdout, "Time: {}, Alarm :{}", time, range.end).unwrap();
@@ -455,6 +434,7 @@ fn main() -> ! {
                 FSMState::InRange { range } => {
                     writeln!(stdout, "Exit").unwrap();
                     data = [colors::GREEN; 1];
+
                     if let Some(x) = range.next {
                         state = FSMState::WaitNextRange { range: x };
                         rtc.set_alarm1_hms(x.start).unwrap();
@@ -467,7 +447,9 @@ fn main() -> ! {
 
             ws.write(data.iter().cloned()).unwrap();
         }
-        epd.update_and_display_frame(&mut spi0, &display.buffer()).unwrap();
+        epd.update_and_display_frame(&mut spi0, &display.buffer())
+            .unwrap();
+        epd.sleep(&mut spi0).unwrap();
     }
 }
 

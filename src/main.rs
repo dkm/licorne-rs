@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+// #![deny(warnings)]
 #![no_main]
 #![no_std]
 
@@ -17,13 +19,8 @@ extern crate tm4c123x_hal;
 extern crate tm4c_hal;
 extern crate ws2812_spi;
 
-// cheap/dumb way to convert time fields to strings.
-const NUM_CONV: [&str; 60] = [
-    "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31",
-    "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47",
-    "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59",
-];
+use cortex_m_semihosting::{debug, hprintln};
+use panic_semihosting as _;
 
 use tm4c_hal::delay::Delay;
 
@@ -48,20 +45,6 @@ use cortex_m_rt::{entry, exception};
 use cortex_m_semihosting::hio;
 
 use ds323x::{Alarm2Matching, DayAlarm2, Ds323x, Hours, NaiveTime, Rtcc, Timelike};
-use tm4c123x_hal::spi::MODE_0;
-
-use tm4c123x_hal::{
-    //    delay,
-    //    timer::Timer,
-    gpio::{gpiod::PD6, Floating, GpioExt, Input, InterruptMode, PullUp, AF2, AF3},
-    i2c::I2c,
-    interrupt,
-    spi::Spi,
-    sysctl::{self, SysctlExt},
-    time::U32Ext,
-
-    tm4c123x,
-};
 
 use core::{cell::RefCell, fmt::Write, ops::DerefMut};
 
@@ -82,24 +65,230 @@ macro_rules! debug_only {
     };
 }
 
-#[derive(PartialEq)]
-struct TimeRange<'a> {
-    start: NaiveTime,
-    end: NaiveTime,
+// cheap/dumb way to convert time fields to strings.
+const NUM_CONV: [&str; 60] = [
+    "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15",
+    "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31",
+    "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47",
+    "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59",
+];
 
-    next: Option<&'a TimeRange<'a>>,
-    in_color: RGB8,
-    name: &'static str,
-}
+use tm4c123x_hal::{
+    gpio::gpioa::{PA2, PA4, PA5},
+    gpio::gpiob::{PB0, PB2, PB3},
+    gpio::gpioc::PC6,
+    gpio::gpiod::{PD1, PD6},
+    gpio::gpioe::PE4,
+    gpio::{
+        AlternateFunction, Floating, GpioExt, Input, InterruptMode, OpenDrain, Output, PullDown,
+        PullUp, PushPull, AF2, AF3,
+    },
+    i2c::I2c,
+    spi::{Spi, MODE_0},
+    sysctl::{self, SysctlExt},
+    time::U32Ext,
+    tm4c123x::{I2C0, SSI0},
+};
 
-enum FSMState<'a> {
-    Idle,
-    InRange { range: &'a TimeRange<'a> },
-    WaitNextRange { range: &'a TimeRange<'a> },
-}
+type I2cT = I2c<
+    I2C0,
+    (
+        PB2<AlternateFunction<AF3, PushPull>>,
+        PB3<AlternateFunction<AF3, OpenDrain<Floating>>>,
+    ),
+>;
 
-// PIN used for RTC signaling. Shared between main app and IRQ handler
-static GPIO_PD6: Mutex<RefCell<Option<PD6<Input<PullUp>>>>> = Mutex::new(RefCell::new(None));
+type RtcT = Ds323x<ds323x::interface::I2cInterface<I2cT>, ds323x::ic::DS3231>;
+
+type SpiT = Spi<
+    SSI0,
+    (
+        PA2<AlternateFunction<AF2, PushPull>>,
+        PA4<AlternateFunction<AF2, PushPull>>,
+        PA5<AlternateFunction<AF2, PullDown>>,
+    ),
+>;
+
+type EpdT = EPD2in13<
+    SpiT,
+    PC6<Output<PushPull>>,
+    PB0<Input<Floating>>,
+    PE4<Output<PushPull>>,
+    PD1<Output<PushPull>>,
+>;
+
+#[rtic::app(device = tm4c123x, peripherals = true)]
+const APP: () = {
+    struct Resources {
+        // The RTC periph
+        rtc: RtcT,
+
+        // e-ink
+        epd: EpdT,
+        display: Display2in13,
+        spi: SpiT,
+
+        rtc_int_pin: PD6<Input<PullUp>>,
+    }
+
+    #[init]
+    fn init(cx: init::Context) -> init::LateResources {
+        // Alias peripherals
+        let p: tm4c123x_hal::Peripherals = cx.device;
+
+        //        let p = tm4c123x_hal::Peripherals::take().unwrap();
+        let mut sc = p.SYSCTL.constrain();
+
+        sc.clock_setup.oscillator = sysctl::Oscillator::Main(
+            sysctl::CrystalFrequency::_16mhz,
+            sysctl::SystemClock::UsePll(sysctl::PllOutputFrequency::_80_00mhz),
+        );
+        let clocks = sc.clock_setup.freeze();
+
+        let mut porta = p.GPIO_PORTA.split(&sc.power_control);
+        let mut portb = p.GPIO_PORTB.split(&sc.power_control);
+        let portc = p.GPIO_PORTC.split(&sc.power_control);
+        let portd = p.GPIO_PORTD.split(&sc.power_control);
+        let porte = p.GPIO_PORTE.split(&sc.power_control);
+
+        let i2c_dev = I2c::i2c0(
+            p.I2C0,
+            (
+                portb.pb2.into_af_push_pull::<AF3>(&mut portb.control), // SCL
+                portb
+                    .pb3
+                    .into_af_open_drain::<AF3, Floating>(&mut portb.control),
+            ), // SDA
+            100.khz(),
+            &clocks,
+            &sc.power_control,
+        );
+        let mut rtc = Ds323x::new_ds3231(i2c_dev);
+
+        let mut spi0 = Spi::spi0(
+            p.SSI0,
+            (
+                porta.pa2.into_af_push_pull::<AF2>(&mut porta.control), // SCK
+                porta.pa4.into_af_push_pull::<AF2>(&mut porta.control), // Miso
+                porta.pa5.into_af_pull_down::<AF2>(&mut porta.control),
+            ), // Mosi
+            MODE_0,
+            2_000_000.hz(),
+            &clocks,
+            &sc.power_control,
+        );
+        let cs_pin = portc.pc6.into_push_pull_output(); // cs
+        let rst_pin = portd.pd1.into_push_pull_output();
+        let dc_pin = porte.pe4.into_push_pull_output(); // dc
+        let busy_pin = portb.pb0.into_floating_input();
+
+        // Cortex-M peripherals
+        let cp: cortex_m::Peripherals = cx.core;
+
+        let mut delay = Delay::new(cp.SYST, &clocks);
+
+        let mut epd =
+            EPD2in13::new(&mut spi0, cs_pin, busy_pin, dc_pin, rst_pin, &mut delay).unwrap();
+
+        let mut display = Display2in13::default();
+        display.set_rotation(DisplayRotation::Rotate90);
+
+        display.clear(White).unwrap();
+        epd.update_and_display_frame(&mut spi0, &display.buffer())
+            .unwrap();
+
+        // GPIO for interrupt
+        // SQW/INT pin wired to PD6
+        let mut rtc_int_pin = portd.pd6.into_pull_up_input();
+        rtc_int_pin.set_interrupt_mode(InterruptMode::EdgeFalling);
+        rtc_int_pin.clear_interrupt();
+
+        rtc.clear_alarm1_matched_flag().unwrap();
+        rtc.clear_alarm2_matched_flag().unwrap();
+
+        rtc.use_int_sqw_output_as_interrupt().unwrap();
+
+        // alarm1 used to track events
+        // alarm2 used to refresh clock display every minute.
+        rtc.enable_alarm1_interrupts().unwrap();
+        rtc.enable_alarm2_interrupts().unwrap();
+
+        rtc.set_alarm2_day(
+            DayAlarm2 {
+                day: 1,
+                hour: Hours::H24(1),
+                minute: 0,
+            },
+            Alarm2Matching::OncePerMinute,
+        )
+        .unwrap();
+
+        hprintln!("init").unwrap();
+
+        init::LateResources {
+            rtc,
+            epd,
+            display,
+            spi: spi0,
+            rtc_int_pin,
+        }
+    }
+
+    #[task(priority = 3, resources = [rtc, epd])]
+    fn handle_event_alarm(cx: handle_event_alarm::Context, time: NaiveTime) {
+        hprintln!("handle event alarm! {} {}", time.hour(), time.minute()).unwrap();
+    }
+
+    #[task(priority = 3, resources = [rtc, epd, display, spi])]
+    fn display_time(mut cx: display_time::Context, time: NaiveTime) {
+        draw_hour(&mut cx.resources.display, &time);
+
+        cx.resources
+            .epd
+            .update_and_display_frame(&mut cx.resources.spi, &cx.resources.display.buffer())
+            .unwrap();
+        cx.resources.epd.sleep(&mut cx.resources.spi).unwrap();
+
+        hprintln!("minute is changing {} {}", time.hour(), time.minute()).unwrap();
+    }
+
+    #[task(binds = GPIOD, resources = [rtc, rtc_int_pin], spawn = [display_time, handle_event_alarm] )]
+    fn gpiod(mut cx: gpiod::Context) {
+        let mut a1 = false;
+        let mut a2 = false;
+
+        let mut time: Option<NaiveTime> = None;
+
+        cx.resources.rtc.lock(|rtc| {
+            time = Some(rtc.get_time().unwrap());
+
+            if rtc.has_alarm1_matched().unwrap() {
+                rtc.clear_alarm1_matched_flag().unwrap();
+                a1 = true;
+            }
+            if rtc.has_alarm2_matched().unwrap() {
+                rtc.clear_alarm2_matched_flag().unwrap();
+                a2 = true;
+            }
+        });
+
+        if a1 {
+            cx.spawn.handle_event_alarm(time.unwrap()).unwrap();
+        }
+        if a2 {
+            cx.spawn.display_time(time.unwrap()).unwrap();
+        }
+
+        cx.resources.rtc_int_pin.clear_interrupt();
+
+        hprintln!("hep").unwrap();
+    }
+
+    // Use GPIOA as dispatch interrupt.
+    extern "C" {
+        fn GPIOA();
+    }
+};
 
 const FONT: embedded_graphics::fonts::Font24x32 = Font24x32;
 const FONT_SZ: Size = embedded_graphics::fonts::Font24x32::CHARACTER_SIZE;
@@ -117,362 +306,7 @@ fn draw_text(display: &mut Display2in13, text: &str, line: u8, x: u8) {
         .draw(display);
 }
 
-fn clear_line(display: &mut Display2in13, line: u8) {
-    //    repeat = display.size().width / 24;
-
-    let style = primitive_style!(fill_color = White);
-    let line = line as i32;
-
-    let h = FONT_SZ.height as i32;
-
-    Rectangle::new(
-        Point::new(0, line * h),
-        Point::new(display.size().width as i32, (line + 1) * h),
-    )
-    .into_styled(style)
-    .draw(display)
-    .unwrap();
-}
-
 fn draw_hour(display: &mut Display2in13, time: &NaiveTime) {
     draw_text(display, NUM_CONV[time.hour() as usize], 0, 0);
     draw_text(display, NUM_CONV[time.minute() as usize], 0, 3);
-}
-
-#[entry]
-fn main() -> ! {
-    let mut stdout = hio::hstdout().unwrap();
-    debug_only! {writeln!(stdout, "Hello, world!").unwrap()}
-
-    let p = tm4c123x_hal::Peripherals::take().unwrap();
-    let mut sc = p.SYSCTL.constrain();
-
-    sc.clock_setup.oscillator = sysctl::Oscillator::Main(
-        sysctl::CrystalFrequency::_16mhz,
-        sysctl::SystemClock::UsePll(sysctl::PllOutputFrequency::_80_00mhz),
-    );
-    let clocks = sc.clock_setup.freeze();
-
-    let mut porta = p.GPIO_PORTA.split(&sc.power_control);
-    let mut portb = p.GPIO_PORTB.split(&sc.power_control);
-    let portc = p.GPIO_PORTC.split(&sc.power_control);
-    let mut portd = p.GPIO_PORTD.split(&sc.power_control);
-    let porte = p.GPIO_PORTE.split(&sc.power_control);
-
-    writeln!(stdout, "conf spi").unwrap();
-
-    let spi = Spi::spi1(
-        p.SSI1,
-        (
-            portd.pd0.into_af_push_pull::<AF2>(&mut portd.control), // SCK
-            portd.pd2.into_af_push_pull::<AF2>(&mut portd.control), // Miso
-            portd.pd3.into_af_pull_down::<AF2>(&mut portd.control),
-        ), // Mosi
-        ws2812::MODE,
-        3_000_000.hz(),
-        &clocks,
-        &sc.power_control,
-    );
-    writeln!(stdout, "SPI configured").unwrap();
-
-    writeln!(stdout, "SPI for EPD setup").unwrap();
-    let mut spi0 = Spi::spi0(
-        p.SSI0,
-        (
-            porta.pa2.into_af_push_pull::<AF2>(&mut porta.control), // SCK
-            porta.pa4.into_af_push_pull::<AF2>(&mut porta.control), // Miso
-            porta.pa5.into_af_pull_down::<AF2>(&mut porta.control),
-        ), // Mosi
-        MODE_0,
-        2_000_000.hz(),
-        &clocks,
-        &sc.power_control,
-    );
-    writeln!(stdout, "SPI for EPD setup done").unwrap();
-
-    let cs_pin = portc.pc6.into_push_pull_output(); // cs
-    let rst_pin = portd.pd1.into_push_pull_output();
-    let dc_pin = porte.pe4.into_push_pull_output(); // dc
-    let busy_pin = portb.pb0.into_floating_input();
-
-    // Setup EPD
-    let cp = cortex_m::Peripherals::take().unwrap();
-    let mut delay = Delay::new(cp.SYST, &clocks);
-
-    writeln!(stdout, "EPD setup").unwrap();
-    let mut epd = EPD2in13::new(&mut spi0, cs_pin, busy_pin, dc_pin, rst_pin, &mut delay).unwrap();
-    writeln!(stdout, "EPD setup done").unwrap();
-
-    let mut display = Display2in13::default();
-    display.set_rotation(DisplayRotation::Rotate90);
-
-    display.clear(White).unwrap();
-    epd.update_and_display_frame(&mut spi0, &display.buffer())
-        .unwrap();
-
-    writeln!(stdout, "EPD cleared").unwrap();
-
-    writeln!(stdout, "conf i2c").unwrap();
-    let i2c_dev = I2c::i2c0(
-        p.I2C0,
-        (
-            portb.pb2.into_af_push_pull::<AF3>(&mut portb.control), // SCL
-            portb
-                .pb3
-                .into_af_open_drain::<AF3, Floating>(&mut portb.control),
-        ), // SDA
-        100.khz(),
-        &clocks,
-        &sc.power_control,
-    );
-    writeln!(stdout, "I2C configured").unwrap();
-
-    writeln!(stdout, "conf ds3231").unwrap();
-    let mut rtc = Ds323x::new_ds3231(i2c_dev);
-
-    // we'll use interrupt
-    rtc.clear_alarm1_matched_flag().unwrap();
-    rtc.clear_alarm2_matched_flag().unwrap();
-
-    rtc.use_int_sqw_output_as_interrupt().unwrap();
-
-    // alarm1 used to track events
-    // alarm2 used to refresh clock display every minute.
-    rtc.enable_alarm1_interrupts().unwrap();
-    rtc.enable_alarm2_interrupts().unwrap();
-
-    // GPIO for interrupt
-    // SQW/INT pin wired to PD6
-    let mut pd6 = portd.pd6.into_pull_up_input();
-    pd6.set_interrupt_mode(InterruptMode::EdgeFalling);
-
-    free(|cs| {
-        GPIO_PD6.borrow(cs).replace(Some(pd6));
-    });
-
-    let time = NaiveTime::from_hms(15, 43, 00);
-    rtc.set_time(&time).unwrap();
-
-    let time = rtc.get_time().unwrap();
-    writeln!(stdout, "Time: {} ", time).unwrap();
-
-    draw_text(&mut display, "--:--", 0, 0);
-    draw_text(&mut display, "----", 1, 0);
-
-    epd.update_and_display_frame(&mut spi0, &display.buffer())
-        .unwrap();
-
-    let time = rtc.get_time().unwrap();
-
-    writeln!(stdout, "Time: {} ", time).unwrap();
-    writeln!(stdout, "ds3231 configured").unwrap();
-
-    // writeln!(stdout, "Creating Timer").unwrap();
-    // let mut timer0 = Timer::wtimer0(p.WTIMER0, 1.hz(), &sc.power_control, &clocks);
-    // writeln!(stdout, "Timer created").unwrap();
-    // writeln!(stdout, "Will block until timeout").unwrap();
-    // let _ret = block!(timer0.wait());
-    // writeln!(stdout, "Timeout").unwrap();
-
-    // ws2812
-    let mut ws = ws2812::Ws2812::new(spi);
-
-    let mut data = [colors::GREEN];
-
-    // let m0 = TimeRange {
-    //     start: NaiveTime::from_hms(00, 01, 00),
-    //     end: NaiveTime::from_hms(00, 05, 00),
-    //     next: None,
-    //     in_color: colors::RED,
-    // };
-
-    // let m1 = TimeRange {
-    //     start: NaiveTime::from_hms(00, 06, 00),
-    //     end: NaiveTime::from_hms(00, 07, 00),
-    //     next: Some(&m0),
-    //     in_color: colors::PINK,
-    // };
-
-    // let first = TimeRange {
-    //     start: NaiveTime::from_hms(00, 10, 00),
-    //     end: NaiveTime::from_hms(00, 01, 00),
-    //     next: Some(&m1),
-    //     in_color: colors::BLUE,
-    // };
-
-    let m0 = TimeRange {
-        start: NaiveTime::from_hms(7, 0, 0),
-        end: NaiveTime::from_hms(8, 0, 0),
-        next: None,
-        in_color: colors::RED,
-        name: "red!",
-    };
-
-    let m1 = TimeRange {
-        start: NaiveTime::from_hms(2, 0, 0),
-        end: NaiveTime::from_hms(6, 59, 0),
-        next: Some(&m0),
-        in_color: colors::PINK,
-        name: "pink!",
-    };
-
-    let first = TimeRange {
-        start: NaiveTime::from_hms(23, 0, 0),
-        end: NaiveTime::from_hms(1, 2, 0),
-        next: Some(&m1),
-        in_color: colors::BLUE,
-        name: "blue!",
-    };
-
-    //
-    writeln!(stdout, "Alarm2 set...").unwrap();
-    rtc.set_alarm2_day(
-        DayAlarm2 {
-            day: 1,
-            hour: Hours::H24(1),
-            minute: 0,
-        },
-        Alarm2Matching::OncePerMinute,
-    )
-    .unwrap();
-    writeln!(stdout, "Alarm2 set!").unwrap();
-
-    let all_ranges = [&first, &m1, &m0];
-
-    let time = rtc.get_time().unwrap();
-    let mut state = FSMState::Idle;
-    writeln!(stdout, "Will check for init state ?").unwrap();
-    let mut found = false;
-
-    for range in all_ranges.iter() {
-        if time < range.start {
-            state = FSMState::WaitNextRange { range };
-            writeln!(
-                stdout,
-                "Waiting for next range to activate: {}:{}",
-                range.start, range.end
-            )
-            .unwrap();
-            rtc.set_alarm1_hms(range.start).unwrap();
-            found = true;
-            break;
-        }
-
-        if time >= range.start && time < range.end {
-            state = FSMState::InRange { range };
-            writeln!(stdout, "In range: {}:{}", range.start, range.end).unwrap();
-            rtc.set_alarm1_hms(range.end).unwrap();
-            found = true;
-            break;
-        }
-    }
-
-    if !found {
-        let range = all_ranges[all_ranges.len() - 1];
-
-        writeln!(
-            stdout,
-            "Next alarm is tomorrow: {}:{}",
-            range.start, range.end
-        )
-        .unwrap();
-        rtc.set_alarm1_hms(range.start).unwrap();
-    }
-
-    let init_data = [colors::GREEN, colors::BLUE, colors::AQUAMARINE];
-    ws.write(init_data.iter().cloned()).unwrap();
-
-    // unmask GPIOD Interrupt
-    tm4c123x::NVIC::unpend(tm4c123x_hal::tm4c123x::Interrupt::GPIOD);
-    unsafe {
-        tm4c123x::NVIC::unmask(tm4c123x_hal::tm4c123x::Interrupt::GPIOD);
-    };
-
-    loop {
-        if !rtc.has_alarm1_matched().unwrap() && !rtc.has_alarm2_matched().unwrap() {
-            // check if an alarm has been triggered. If not, then make the core
-            // go to sleep until the next IRQ is raised.
-            cortex_m::asm::wfi();
-            continue;
-        }
-        let time = rtc.get_time().unwrap();
-
-        // refresh the displayed time
-        if rtc.has_alarm2_matched().unwrap() {
-            writeln!(
-                stdout,
-                "minute is changing {} {}",
-                time.hour(),
-                time.minute()
-            )
-            .unwrap();
-            rtc.clear_alarm2_matched_flag().unwrap();
-
-            draw_hour(&mut display, &time);
-        }
-
-        // something happenned
-        if rtc.has_alarm1_matched().unwrap() {
-            rtc.clear_alarm1_matched_flag().unwrap();
-
-            writeln!(stdout, "Something is happening").unwrap();
-            clear_line(&mut display, 1);
-
-            match state {
-                FSMState::Idle => (),
-                FSMState::WaitNextRange { range } => {
-                    writeln!(stdout, "Enter").unwrap();
-                    draw_text(&mut display, range.name, 1, 0);
-
-                    state = FSMState::InRange { range };
-                    data = [range.in_color; 1];
-                    writeln!(stdout, "Time: {}, Alarm :{}", time, range.end).unwrap();
-                    rtc.set_alarm1_hms(range.end).unwrap();
-                }
-
-                FSMState::InRange { range } => {
-                    writeln!(stdout, "Exit").unwrap();
-                    data = [colors::GREEN; 1];
-
-                    if let Some(x) = range.next {
-                        state = FSMState::WaitNextRange { range: x };
-                        rtc.set_alarm1_hms(x.start).unwrap();
-                    } else {
-                        state = FSMState::WaitNextRange { range: &first };
-                        rtc.set_alarm1_hms(first.start).unwrap();
-                    }
-                }
-            }
-
-            ws.write(data.iter().cloned()).unwrap();
-        }
-
-        // refresh display and make it go ZZZzzzZZzzz
-        epd.update_and_display_frame(&mut spi0, &display.buffer())
-            .unwrap();
-        epd.sleep(&mut spi0).unwrap();
-    }
-}
-
-#[exception]
-/// The hard fault handler
-fn HardFault(ef: &cortex_m_rt::ExceptionFrame) -> ! {
-    panic!("HardFault at {:#?}", ef);
-}
-
-#[interrupt]
-/// The GPIOD handler (in our case, PD6 from RTC on falling edge)
-fn GPIOD() {
-    free(|cs| {
-        let mut pd6_ref = GPIO_PD6.borrow(cs).borrow_mut();
-        if let Some(ref mut pd6) = pd6_ref.deref_mut() {
-            pd6.clear_interrupt()
-        }
-    });
-}
-
-#[exception]
-/// The default exception handler
-fn DefaultHandler(irqn: i16) {
-    panic!("Unhandled exception (IRQn = {})", irqn);
 }

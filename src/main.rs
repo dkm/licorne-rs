@@ -17,7 +17,7 @@ extern crate tm4c123x_hal;
 extern crate tm4c_hal;
 extern crate ws2812_spi;
 
-// cheap/dumb way to convert time field to strings.
+// cheap/dumb way to convert time fields to strings.
 const NUM_CONV: [&str; 60] = [
     "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15",
     "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31",
@@ -250,7 +250,7 @@ fn main() -> ! {
         GPIO_PD6.borrow(cs).replace(Some(pd6));
     });
 
-    let time = NaiveTime::from_hms(07, 00, 45);
+    let time = NaiveTime::from_hms(15, 43, 00);
     rtc.set_time(&time).unwrap();
 
     let time = rtc.get_time().unwrap();
@@ -301,24 +301,24 @@ fn main() -> ! {
     // };
 
     let m0 = TimeRange {
-        start: NaiveTime::from_hms(07, 09, 05),
-        end: NaiveTime::from_hms(07, 10, 00),
+        start: NaiveTime::from_hms(7, 0, 0),
+        end: NaiveTime::from_hms(8, 0, 0),
         next: None,
         in_color: colors::RED,
         name: "red!",
     };
 
     let m1 = TimeRange {
-        start: NaiveTime::from_hms(07, 06, 00),
-        end: NaiveTime::from_hms(07, 08, 00),
+        start: NaiveTime::from_hms(2, 0, 0),
+        end: NaiveTime::from_hms(6, 59, 0),
         next: Some(&m0),
         in_color: colors::PINK,
         name: "pink!",
     };
 
     let first = TimeRange {
-        start: NaiveTime::from_hms(07, 01, 00),
-        end: NaiveTime::from_hms(07, 02, 00),
+        start: NaiveTime::from_hms(23, 0, 0),
+        end: NaiveTime::from_hms(1, 2, 0),
         next: Some(&m1),
         in_color: colors::BLUE,
         name: "blue!",
@@ -416,13 +416,12 @@ fn main() -> ! {
             rtc.clear_alarm1_matched_flag().unwrap();
 
             writeln!(stdout, "Something is happening").unwrap();
+            clear_line(&mut display, 1);
 
             match state {
                 FSMState::Idle => (),
                 FSMState::WaitNextRange { range } => {
                     writeln!(stdout, "Enter").unwrap();
-
-                    clear_line(&mut display, 1);
                     draw_text(&mut display, range.name, 1, 0);
 
                     state = FSMState::InRange { range };
@@ -447,6 +446,8 @@ fn main() -> ! {
 
             ws.write(data.iter().cloned()).unwrap();
         }
+
+        // refresh display and make it go ZZZzzzZZzzz
         epd.update_and_display_frame(&mut spi0, &display.buffer())
             .unwrap();
         epd.sleep(&mut spi0).unwrap();

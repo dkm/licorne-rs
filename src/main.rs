@@ -77,7 +77,7 @@ use tm4c123x_hal::{
     gpio::gpioa::{PA2, PA4, PA5},
     gpio::gpiob::{PB0, PB2, PB3},
     gpio::gpioc::PC6,
-    gpio::gpiod::{PD1, PD6},
+    gpio::gpiod::{PD0, PD1, PD2, PD3, PD6},
     gpio::gpioe::PE4,
     gpio::{
         AlternateFunction, Floating, GpioExt, Input, InterruptMode, OpenDrain, Output, PullDown,
@@ -87,7 +87,7 @@ use tm4c123x_hal::{
     spi::{Spi, MODE_0},
     sysctl::{self, SysctlExt},
     time::U32Ext,
-    tm4c123x::{I2C0, SSI0},
+    tm4c123x::{I2C0, SSI0, SSI1},
 };
 
 type I2cT = I2c<
@@ -100,7 +100,7 @@ type I2cT = I2c<
 
 type RtcT = Ds323x<ds323x::interface::I2cInterface<I2cT>, ds323x::ic::DS3231>;
 
-type SpiT = Spi<
+type Spi0T = Spi<
     SSI0,
     (
         PA2<AlternateFunction<AF2, PushPull>>,
@@ -109,13 +109,38 @@ type SpiT = Spi<
     ),
 >;
 
+type Spi1T = Spi<
+    SSI1,
+    (
+        PD0<AlternateFunction<AF2, PushPull>>,
+        PD2<AlternateFunction<AF2, PushPull>>,
+        PD3<AlternateFunction<AF2, PullDown>>,
+    ),
+>;
+
 type EpdT = EPD2in13<
-    SpiT,
+    Spi0T,
     PC6<Output<PushPull>>,
     PB0<Input<Floating>>,
     PE4<Output<PushPull>>,
     PD1<Output<PushPull>>,
 >;
+
+#[derive(PartialEq)]
+pub struct TimeRange {
+    start: NaiveTime,
+    end: NaiveTime,
+
+    //    next: Option<&'a TimeRange<'a>>,
+    in_color: RGB8,
+    name: &'static str,
+}
+
+pub enum FSMState {
+    Idle,
+    InRange { range: usize },
+    WaitNextRange { range: usize },
+}
 
 #[rtic::app(device = tm4c123x, peripherals = true)]
 const APP: () = {
@@ -126,12 +151,18 @@ const APP: () = {
         // e-ink
         epd: EpdT,
         display: Display2in13,
-        spi: SpiT,
+        spi: Spi0T,
 
         rtc_int_pin: PD6<Input<PullUp>>,
+        // ws2812
+        leds: ws2812::Ws2812<Spi1T>,
+
+        next_or_current_range: usize,
+        ranges: [TimeRange; 3],
+        state: FSMState,
     }
 
-    #[init]
+    #[init(spawn = [display_time])]
     fn init(cx: init::Context) -> init::LateResources {
         // Alias peripherals
         let p: tm4c123x_hal::Peripherals = cx.device;
@@ -148,7 +179,7 @@ const APP: () = {
         let mut porta = p.GPIO_PORTA.split(&sc.power_control);
         let mut portb = p.GPIO_PORTB.split(&sc.power_control);
         let portc = p.GPIO_PORTC.split(&sc.power_control);
-        let portd = p.GPIO_PORTD.split(&sc.power_control);
+        let mut portd = p.GPIO_PORTD.split(&sc.power_control);
         let porte = p.GPIO_PORTE.split(&sc.power_control);
 
         let i2c_dev = I2c::i2c0(
@@ -197,6 +228,21 @@ const APP: () = {
         epd.update_and_display_frame(&mut spi0, &display.buffer())
             .unwrap();
 
+        let spi_ws2812 = Spi::spi1(
+            p.SSI1,
+            (
+                portd.pd0.into_af_push_pull::<AF2>(&mut portd.control), // SCK
+                portd.pd2.into_af_push_pull::<AF2>(&mut portd.control), // Miso
+                portd.pd3.into_af_pull_down::<AF2>(&mut portd.control),
+            ), // Mosi
+            ws2812::MODE,
+            3_000_000.hz(),
+            &clocks,
+            &sc.power_control,
+        );
+
+        let mut leds = ws2812::Ws2812::new(spi_ws2812);
+
         // GPIO for interrupt
         // SQW/INT pin wired to PD6
         let mut rtc_int_pin = portd.pd6.into_pull_up_input();
@@ -223,6 +269,76 @@ const APP: () = {
         )
         .unwrap();
 
+        let time = NaiveTime::from_hms(6, 59, 45);
+        rtc.set_time(&time).unwrap();
+
+        let time = rtc.get_time().unwrap();
+        cx.spawn.display_time(time);
+
+        let ranges = [
+            TimeRange {
+                start: NaiveTime::from_hms(7, 0, 0),
+                end: NaiveTime::from_hms(7, 2, 0),
+                //    next: None,
+                in_color: colors::RED,
+                name: "red!",
+            },
+            TimeRange {
+                start: NaiveTime::from_hms(7, 3, 0),
+                end: NaiveTime::from_hms(7, 6, 0),
+                //    next: None,
+                in_color: colors::GREEN,
+                name: "green",
+            },
+            TimeRange {
+                start: NaiveTime::from_hms(7, 7, 0),
+                end: NaiveTime::from_hms(7, 9, 0),
+                //    next: None,
+                in_color: colors::BLUE,
+                name: "blue!",
+            },
+        ];
+
+        let mut state = FSMState::Idle;
+        let mut found = false;
+        let mut next_or_current_range = 0;
+
+        for (i, range) in ranges.iter().enumerate() {
+            if time < range.start {
+                state = FSMState::WaitNextRange { range: i };
+                hprintln!(
+                    "Waiting for next range to activate: {}:{}",
+                    range.start,
+                    range.end
+                )
+                .unwrap();
+                rtc.set_alarm1_hms(range.start).unwrap();
+                found = true;
+                break;
+            }
+
+            if time >= range.start && time < range.end {
+                state = FSMState::InRange { range: i };
+                hprintln!("In range: {}:{}", range.start, range.end).unwrap();
+                rtc.set_alarm1_hms(range.end).unwrap();
+                found = true;
+                break;
+            }
+            next_or_current_range += 1;
+        }
+
+        if !found {
+            next_or_current_range = 0;
+
+            hprintln!(
+                "Next alarm is tomorrow: {}:{}",
+                ranges[0].start,
+                ranges[0].end
+            )
+            .unwrap();
+            rtc.set_alarm1_hms(ranges[0].start).unwrap();
+        }
+
         hprintln!("init").unwrap();
 
         init::LateResources {
@@ -231,15 +347,72 @@ const APP: () = {
             display,
             spi: spi0,
             rtc_int_pin,
+            leds,
+            ranges,
+            next_or_current_range,
+            state,
         }
     }
 
-    #[task(priority = 3, resources = [rtc, epd])]
-    fn handle_event_alarm(cx: handle_event_alarm::Context, time: NaiveTime) {
+    #[task(priority = 3, resources = [rtc, spi, leds, display, ranges, epd, state, next_or_current_range])]
+    fn handle_event_alarm(mut cx: handle_event_alarm::Context, time: NaiveTime) {
         hprintln!("handle event alarm! {} {}", time.hour(), time.minute()).unwrap();
+        clear_line(&mut cx.resources.display, 1);
+
+        if let Some(new_state) = match cx.resources.state {
+            FSMState::Idle => None,
+            FSMState::WaitNextRange { ref range } => {
+                hprintln!("Enter").unwrap();
+                draw_text(
+                    &mut cx.resources.display,
+                    cx.resources.ranges[*range].name,
+                    1,
+                    0,
+                );
+
+                let data = [cx.resources.ranges[*range].in_color; 8];
+                cx.resources.leds.write(data.iter().cloned()).unwrap();
+
+                hprintln!("Time: {}, Alarm :{}", time, cx.resources.ranges[*range].end).unwrap();
+                cx.resources
+                    .rtc
+                    .set_alarm1_hms(cx.resources.ranges[*range].end)
+                    .unwrap();
+
+                Some(FSMState::InRange { range: *range })
+            }
+
+            FSMState::InRange { ref range } => {
+                hprintln!("Exit").unwrap();
+                let data = [colors::GREEN; 8];
+                cx.resources.leds.write(data.iter().cloned()).unwrap();
+                if *range == cx.resources.ranges.len() {
+                    cx.resources
+                        .rtc
+                        .set_alarm1_hms(cx.resources.ranges[0].start)
+                        .unwrap();
+                    Some(FSMState::WaitNextRange { range: 0 })
+                } else {
+                    cx.resources
+                        .rtc
+                        .set_alarm1_hms(cx.resources.ranges[*range + 1].start)
+                        .unwrap();
+                    Some(FSMState::WaitNextRange { range: *range + 1 })
+                }
+            }
+        } {
+            *cx.resources.state = new_state;
+        }
+
+        // refresh display and make it go ZZZzzzZZzzz
+        cx.resources
+            .epd
+            .update_and_display_frame(&mut cx.resources.spi, &cx.resources.display.buffer())
+            .unwrap();
+        cx.resources.epd.sleep(&mut cx.resources.spi).unwrap();
     }
 
-    #[task(priority = 3, resources = [rtc, epd, display, spi])]
+    #[task(priority = 3, resources = [leds, rtc, epd, display, spi])]
     fn display_time(mut cx: display_time::Context, time: NaiveTime) {
         draw_hour(&mut cx.resources.display, &time);
 
@@ -248,8 +421,15 @@ const APP: () = {
             .update_and_display_frame(&mut cx.resources.spi, &cx.resources.display.buffer())
             .unwrap();
         cx.resources.epd.sleep(&mut cx.resources.spi).unwrap();
+        let data1 = [colors::GREEN; 8];
+        let data2 = [colors::BLUE; 8];
+        if time.minute() % 2 == 0 {
+            cx.resources.leds.write(data1.iter().cloned()).unwrap();
+        } else {
+            cx.resources.leds.write(data2.iter().cloned()).unwrap();
+        }
 
-        hprintln!("minute is changing {} {}", time.hour(), time.minute()).unwrap();
+        hprintln!("refresh time with: {} {}", time.hour(), time.minute()).unwrap();
     }
 
     #[task(binds = GPIOD, resources = [rtc, rtc_int_pin], spawn = [display_time, handle_event_alarm] )]
@@ -292,6 +472,23 @@ const APP: () = {
 
 const FONT: embedded_graphics::fonts::Font24x32 = Font24x32;
 const FONT_SZ: Size = embedded_graphics::fonts::Font24x32::CHARACTER_SIZE;
+
+fn clear_line(display: &mut Display2in13, line: u8) {
+    //    repeat = display.size().width / 24;
+
+    let style = primitive_style!(fill_color = White);
+    let line = line as i32;
+
+    let h = FONT_SZ.height as i32;
+
+    Rectangle::new(
+        Point::new(0, line * h),
+        Point::new(display.size().width as i32, (line + 1) * h),
+    )
+    .into_styled(style)
+    .draw(display)
+    .unwrap();
+}
 
 fn draw_text(display: &mut Display2in13, text: &str, line: u8, x: u8) {
     let y = line as i32 * FONT_SZ.height as i32;

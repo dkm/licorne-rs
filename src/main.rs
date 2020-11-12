@@ -52,16 +52,21 @@ use smart_leds::{colors, SmartLedsWrite, RGB8};
 
 use ws2812_spi as ws2812;
 
+#[cfg(feature = "usesemihosting")]
 macro_rules! debug_only {
     ($statement:stmt) => {
-        if cfg!(debug_assertions) {
             $statement
-        }
     };
     ($code:block) => {
-        if cfg!(debug_assertions) {
             $code
-        }
+    };
+}
+
+#[cfg(not(feature = "usesemihosting"))]
+macro_rules! debug_only {
+    ($statement:stmt) => {
+    };
+    ($code:block) => {
     };
 }
 
@@ -305,13 +310,15 @@ const APP: () = {
 
         for (i, range) in ranges.iter().enumerate() {
             if time < range.start {
-                state = FSMState::WaitNextRange { range: i };
-                hprintln!(
-                    "Waiting for next range to activate: {}:{}",
-                    range.start,
-                    range.end
-                )
-                .unwrap();
+                state = FSMState::WaitNextRange( i) ;
+                debug_only! {
+                    hprintln!(
+                        "Waiting for next range to activate: {}:{}",
+                        range.start,
+                        range.end
+                    ).unwrap()
+                }
+
                 rtc.set_alarm1_hms(range.start).unwrap();
                 found = true;
                 break;
@@ -330,16 +337,17 @@ const APP: () = {
         if !found {
             next_or_current_range = 0;
 
-            hprintln!(
+            debug_only! {hprintln!(
                 "Next alarm is tomorrow: {}:{}",
                 ranges[0].start,
                 ranges[0].end
             )
-            .unwrap();
+                         .unwrap()}
             rtc.set_alarm1_hms(ranges[0].start).unwrap();
         }
 
-        hprintln!("init").unwrap();
+
+        debug_only! {hprintln!("init").unwrap()}
 
         init::LateResources {
             rtc,
@@ -356,13 +364,12 @@ const APP: () = {
 
     #[task(priority = 3, resources = [rtc, spi, leds, display, ranges, epd, state, next_or_current_range])]
     fn handle_event_alarm(mut cx: handle_event_alarm::Context, time: NaiveTime) {
-        hprintln!("handle event alarm! {} {}", time.hour(), time.minute()).unwrap();
-        clear_line(&mut cx.resources.display, 1);
+        debug_only! {hprintln!("handle event alarm! {} {}", time.hour(), time.minute()).unwrap()}
 
         if let Some(new_state) = match cx.resources.state {
             FSMState::Idle => None,
             FSMState::WaitNextRange { ref range } => {
-                hprintln!("Enter").unwrap();
+                debug_only! {hprintln!("Enter").unwrap()}
                 draw_text(
                     &mut cx.resources.display,
                     cx.resources.ranges[*range].name,
@@ -373,7 +380,7 @@ const APP: () = {
                 let data = [cx.resources.ranges[*range].in_color; 8];
                 cx.resources.leds.write(data.iter().cloned()).unwrap();
 
-                hprintln!("Time: {}, Alarm :{}", time, cx.resources.ranges[*range].end).unwrap();
+                debug_only! {hprintln!("Time: {}, Alarm :{}", time, cx.resources.ranges[*range].end).unwrap()}
                 cx.resources
                     .rtc
                     .set_alarm1_hms(cx.resources.ranges[*range].end)
@@ -383,8 +390,8 @@ const APP: () = {
             }
 
             FSMState::InRange { ref range } => {
-                hprintln!("Exit").unwrap();
                 let data = [colors::GREEN; 8];
+                debug_only! {hprintln!("Exit").unwrap()}
                 cx.resources.leds.write(data.iter().cloned()).unwrap();
                 if *range == cx.resources.ranges.len() {
                     cx.resources
@@ -429,7 +436,7 @@ const APP: () = {
             cx.resources.leds.write(data2.iter().cloned()).unwrap();
         }
 
-        hprintln!("refresh time with: {} {}", time.hour(), time.minute()).unwrap();
+        debug_only! {hprintln!("refresh time with: {} {}", time.hour(), time.minute()).unwrap()}
     }
 
     #[task(binds = GPIOD, resources = [rtc, rtc_int_pin], spawn = [display_time, handle_event_alarm] )]
@@ -461,7 +468,7 @@ const APP: () = {
 
         cx.resources.rtc_int_pin.clear_interrupt();
 
-        hprintln!("hep").unwrap();
+        debug_only! {hprintln!("hep").unwrap()}
     }
 
     // Use GPIOA as dispatch interrupt.

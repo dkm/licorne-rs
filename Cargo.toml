@@ -60,3 +60,9 @@ opt-level = 3
 [dependencies.embedded-hal]
 version = "0.2"
 features = ["unproven"]
+
+[features]
+default = []
+
+## This will use semihosting for printing debug trace.
+usesemihosting = []

@@ -70,6 +70,8 @@ macro_rules! debug_only {
     };
 }
 
+const NUM_LEDS: usize = 1;
+
 // cheap/dumb way to convert time fields to strings.
 const NUM_CONV: [&str; 60] = [
     "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15",
@@ -95,6 +97,9 @@ use tm4c123x_hal::{
     tm4c123x::{I2C0, SSI0, SSI1},
 };
 
+// Specialized types for our particular setup.
+
+// i2c for DS3231 RTC
 type I2cT = I2c<
     I2C0,
     (
@@ -105,6 +110,7 @@ type I2cT = I2c<
 
 type RtcT = Ds323x<ds323x::interface::I2cInterface<I2cT>, ds323x::ic::DS3231>;
 
+// spi for WS2812
 type Spi0T = Spi<
     SSI0,
     (
@@ -114,6 +120,7 @@ type Spi0T = Spi<
     ),
 >;
 
+// spi for E-ink screen
 type Spi1T = Spi<
     SSI1,
     (
@@ -136,15 +143,14 @@ pub struct TimeRange {
     start: NaiveTime,
     end: NaiveTime,
 
-    //    next: Option<&'a TimeRange<'a>>,
     in_color: RGB8,
     name: &'static str,
 }
 
 pub enum FSMState {
     Idle,
-    InRange { range: usize },
-    WaitNextRange { range: usize },
+    InRange ( usize ),
+    WaitNextRange ( usize ),
 }
 
 #[rtic::app(device = tm4c123x, peripherals = true)]
@@ -154,9 +160,7 @@ const APP: () = {
         rtc: RtcT,
 
         // e-ink
-        epd: EpdT,
-        display: Display2in13,
-        spi: Spi0T,
+        screen: (EpdT, Display2in13, Spi0T),
 
         rtc_int_pin: PD6<Input<PullUp>>,
         // ws2812
@@ -230,8 +234,6 @@ const APP: () = {
         display.set_rotation(DisplayRotation::Rotate90);
 
         display.clear(White).unwrap();
-        epd.update_and_display_frame(&mut spi0, &display.buffer())
-            .unwrap();
 
         let spi_ws2812 = Spi::spi1(
             p.SSI1,
@@ -274,33 +276,30 @@ const APP: () = {
         )
         .unwrap();
 
-        let time = NaiveTime::from_hms(6, 59, 45);
-        rtc.set_time(&time).unwrap();
+        let time = NaiveTime::from_hms(23,00 , 3);
+//        rtc.set_time(&time).unwrap();
 
         let time = rtc.get_time().unwrap();
         cx.spawn.display_time(time);
 
         let ranges = [
             TimeRange {
-                start: NaiveTime::from_hms(7, 0, 0),
-                end: NaiveTime::from_hms(7, 2, 0),
-                //    next: None,
+                start: NaiveTime::from_hms(0, 0, 0),
+                end: NaiveTime::from_hms(5, 0, 0),
                 in_color: colors::RED,
-                name: "red!",
+                name: "0:0->5:0",
             },
             TimeRange {
-                start: NaiveTime::from_hms(7, 3, 0),
-                end: NaiveTime::from_hms(7, 6, 0),
-                //    next: None,
+                start: NaiveTime::from_hms(5, 1, 0),
+                end: NaiveTime::from_hms(7, 0, 0),
                 in_color: colors::GREEN,
-                name: "green",
+                name: "5:1->7:0",
             },
             TimeRange {
-                start: NaiveTime::from_hms(7, 7, 0),
-                end: NaiveTime::from_hms(7, 9, 0),
-                //    next: None,
+                start: NaiveTime::from_hms(7, 1, 0),
+                end: NaiveTime::from_hms(23, 59, 0),
                 in_color: colors::BLUE,
-                name: "blue!",
+                name: "7:1->23:59",
             },
         ];
 
@@ -308,7 +307,7 @@ const APP: () = {
         let mut found = false;
         let mut next_or_current_range = 0;
 
-        for (i, range) in ranges.iter().enumerate() {
+        for (i, range) in ranges.iter().rev().enumerate() {
             if time < range.start {
                 state = FSMState::WaitNextRange( i) ;
                 debug_only! {
@@ -319,14 +318,45 @@ const APP: () = {
                     ).unwrap()
                 }
 
+                draw_text(
+                    &mut display,
+                    "Wait: ",
+                    1,
+                    0,
+                );
+                draw_text(
+                    &mut display,
+                    range.name,
+                    1,
+                    6,
+                );
+
                 rtc.set_alarm1_hms(range.start).unwrap();
                 found = true;
                 break;
             }
 
             if time >= range.start && time < range.end {
-                state = FSMState::InRange { range: i };
-                hprintln!("In range: {}:{}", range.start, range.end).unwrap();
+                state = FSMState::InRange (i);
+                debug_only! {hprintln!("In range: {}:{}", range.start, range.end).unwrap()}
+
+                let data = [range.in_color; NUM_LEDS];
+                leds.write(data.iter().cloned()).unwrap();
+
+                draw_text(
+                    &mut display,
+                    "In: ",
+                    1,
+                    0,
+                );
+
+                draw_text(
+                    &mut display,
+                    range.name,
+                    1,
+                    4,
+                );
+
                 rtc.set_alarm1_hms(range.end).unwrap();
                 found = true;
                 break;
@@ -346,14 +376,14 @@ const APP: () = {
             rtc.set_alarm1_hms(ranges[0].start).unwrap();
         }
 
+        epd.update_and_display_frame(&mut spi0, &display.buffer())
+            .unwrap();
 
         debug_only! {hprintln!("init").unwrap()}
 
         init::LateResources {
             rtc,
-            epd,
-            display,
-            spi: spi0,
+            screen: (epd, display, spi0),
             rtc_int_pin,
             leds,
             ranges,
@@ -362,22 +392,34 @@ const APP: () = {
         }
     }
 
-    #[task(priority = 3, resources = [rtc, spi, leds, display, ranges, epd, state, next_or_current_range])]
+    #[task(priority = 3, resources = [rtc, screen, leds, ranges, state, next_or_current_range])]
     fn handle_event_alarm(mut cx: handle_event_alarm::Context, time: NaiveTime) {
         debug_only! {hprintln!("handle event alarm! {} {}", time.hour(), time.minute()).unwrap()}
 
+        clear_line(&mut cx.resources.screen.1, 1);
+
         if let Some(new_state) = match cx.resources.state {
             FSMState::Idle => None,
-            FSMState::WaitNextRange { ref range } => {
+            FSMState::WaitNextRange (ref range) => {
                 debug_only! {hprintln!("Enter").unwrap()}
+                clear_line(&mut cx.resources.screen.1, 1);
+
                 draw_text(
-                    &mut cx.resources.display,
-                    cx.resources.ranges[*range].name,
+                    &mut cx.resources.screen.1,
+                    "In: ",
                     1,
                     0,
                 );
 
-                let data = [cx.resources.ranges[*range].in_color; 8];
+                draw_text(
+                    &mut cx.resources.screen.1,
+                    cx.resources.ranges[*range].name,
+                    1,
+                    4,
+                );
+
+                let data = [cx.resources.ranges[*range].in_color; NUM_LEDS];
+
                 cx.resources.leds.write(data.iter().cloned()).unwrap();
 
                 debug_only! {hprintln!("Time: {}, Alarm :{}", time, cx.resources.ranges[*range].end).unwrap()}
@@ -386,25 +428,48 @@ const APP: () = {
                     .set_alarm1_hms(cx.resources.ranges[*range].end)
                     .unwrap();
 
-                Some(FSMState::InRange { range: *range })
+                Some(FSMState::InRange (*range))
             }
 
-            FSMState::InRange { ref range } => {
-                let data = [colors::GREEN; 8];
+            FSMState::InRange (ref range) => {
                 debug_only! {hprintln!("Exit").unwrap()}
+
+                let data = [colors::GREEN; NUM_LEDS];
+
                 cx.resources.leds.write(data.iter().cloned()).unwrap();
-                if *range == cx.resources.ranges.len() {
+                draw_text(
+                    &mut cx.resources.screen.1,
+                    "Wait: ",
+                    1,
+                    0,
+                );
+
+                if *range == cx.resources.ranges.len()-1 {
+                    draw_text(
+                        &mut cx.resources.screen.1,
+                        cx.resources.ranges[0].name,
+                        1,
+                        6,
+                    );
+
                     cx.resources
                         .rtc
                         .set_alarm1_hms(cx.resources.ranges[0].start)
                         .unwrap();
-                    Some(FSMState::WaitNextRange { range: 0 })
+                    Some(FSMState::WaitNextRange (0))
                 } else {
+                    draw_text(
+                        &mut cx.resources.screen.1,
+                        cx.resources.ranges[*range + 1].name,
+                        1,
+                        6,
+                    );
+
                     cx.resources
                         .rtc
                         .set_alarm1_hms(cx.resources.ranges[*range + 1].start)
                         .unwrap();
-                    Some(FSMState::WaitNextRange { range: *range + 1 })
+                    Some(FSMState::WaitNextRange (*range + 1))
                 }
             }
         } {
@@ -412,29 +477,22 @@ const APP: () = {
         }
 
         // refresh display and make it go ZZZzzzZZzzz
-        cx.resources
-            .epd
-            .update_and_display_frame(&mut cx.resources.spi, &cx.resources.display.buffer())
-            .unwrap();
-        cx.resources.epd.sleep(&mut cx.resources.spi).unwrap();
+        // cx.resources
+        //     .epd
+        //     .update_and_display_frame(&mut cx.resources.spi, &cx.resources.display.buffer())
+        //     .unwrap();
+        // cx.resources.epd.sleep(&mut cx.resources.spi).unwrap();
     }
 
-    #[task(priority = 3, resources = [leds, rtc, epd, display, spi])]
+    #[task(priority = 1, resources = [leds, rtc, screen])]
     fn display_time(mut cx: display_time::Context, time: NaiveTime) {
-        draw_hour(&mut cx.resources.display, &time);
-
-        cx.resources
-            .epd
-            .update_and_display_frame(&mut cx.resources.spi, &cx.resources.display.buffer())
-            .unwrap();
-        cx.resources.epd.sleep(&mut cx.resources.spi).unwrap();
-        let data1 = [colors::GREEN; 8];
-        let data2 = [colors::BLUE; 8];
-        if time.minute() % 2 == 0 {
-            cx.resources.leds.write(data1.iter().cloned()).unwrap();
-        } else {
-            cx.resources.leds.write(data2.iter().cloned()).unwrap();
-        }
+        cx.resources.screen.lock(|screen| {
+            draw_hour(&mut screen.1, &time);
+            screen.0
+                .update_and_display_frame(&mut screen.2, &screen.1.buffer())
+                .unwrap();
+            screen.0.sleep(&mut screen.2).unwrap();
+        });
 
         debug_only! {hprintln!("refresh time with: {} {}", time.hour(), time.minute()).unwrap()}
     }
@@ -471,19 +529,21 @@ const APP: () = {
         debug_only! {hprintln!("hep").unwrap()}
     }
 
-    // Use GPIOA as dispatch interrupt.
+    // Use GPIOA/B as dispatch interrupt.
     extern "C" {
         fn GPIOA();
     }
+    extern "C" {
+        fn GPIOB();
+    }
+
 };
 
 const FONT: embedded_graphics::fonts::Font24x32 = Font24x32;
 const FONT_SZ: Size = embedded_graphics::fonts::Font24x32::CHARACTER_SIZE;
 
-fn clear_line(display: &mut Display2in13, line: u8) {
-    //    repeat = display.size().width / 24;
-
-    let style = primitive_style!(fill_color = White);
+fn fill_line(display: &mut Display2in13, line: u8, color: embedded_graphics::pixelcolor::BinaryColor) {
+    let style = primitive_style!(fill_color = color);
     let line = line as i32;
 
     let h = FONT_SZ.height as i32;
@@ -492,9 +552,13 @@ fn clear_line(display: &mut Display2in13, line: u8) {
         Point::new(0, line * h),
         Point::new(display.size().width as i32, (line + 1) * h),
     )
-    .into_styled(style)
-    .draw(display)
-    .unwrap();
+        .into_styled(style)
+        .draw(display)
+        .unwrap();
+}
+
+fn clear_line(display: &mut Display2in13, line: u8) {
+    fill_line(display, line, White);
 }
 
 fn draw_text(display: &mut Display2in13, text: &str, line: u8, x: u8) {
@@ -512,5 +576,6 @@ fn draw_text(display: &mut Display2in13, text: &str, line: u8, x: u8) {
 
 fn draw_hour(display: &mut Display2in13, time: &NaiveTime) {
     draw_text(display, NUM_CONV[time.hour() as usize], 0, 0);
+    draw_text(display, ":", 0, 2);
     draw_text(display, NUM_CONV[time.minute() as usize], 0, 3);
 }

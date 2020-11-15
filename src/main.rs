@@ -55,19 +55,17 @@ use ws2812_spi as ws2812;
 #[cfg(feature = "usesemihosting")]
 macro_rules! debug_only {
     ($statement:stmt) => {
-            $statement
+        $statement
     };
     ($code:block) => {
-            $code
+        $code
     };
 }
 
 #[cfg(not(feature = "usesemihosting"))]
 macro_rules! debug_only {
-    ($statement:stmt) => {
-    };
-    ($code:block) => {
-    };
+    ($statement:stmt) => {};
+    ($code:block) => {};
 }
 
 const NUM_LEDS: usize = 1;
@@ -80,9 +78,29 @@ const NUM_CONV: [&str; 60] = [
     "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59",
 ];
 
+// PA2: SSI0
+// PA4: SSI0
+// PA5: SSI0
+//
+// PB0: EPD
+// PB1: Rotary Encoder
+// PB2: I2C0
+// PB3: I2C0
+// PB4: Rotary Encoder
+//
+// PC6: EPD
+//
+// PD0: SSI1
+// PD1: EPD
+// PD2: SSI1
+// PD3: SSI1
+// PD6: RTC / INT
+//
+// PE4: EPD
+
 use tm4c123x_hal::{
     gpio::gpioa::{PA2, PA4, PA5},
-    gpio::gpiob::{PB0, PB2, PB3},
+    gpio::gpiob::{PB0, PB1, PB2, PB3, PB4},
     gpio::gpioc::PC6,
     gpio::gpiod::{PD0, PD1, PD2, PD3, PD6},
     gpio::gpioe::PE4,
@@ -97,6 +115,7 @@ use tm4c123x_hal::{
     tm4c123x::{I2C0, SSI0, SSI1},
 };
 
+use rotary_encoder_hal::{Direction, Rotary};
 // Specialized types for our particular setup.
 
 // i2c for DS3231 RTC
@@ -138,6 +157,8 @@ type EpdT = EPD2in13<
     PD1<Output<PushPull>>,
 >;
 
+type RotaryT = Rotary<PB1<Input<PullUp>>, PB4<Input<PullUp>>>;
+
 #[derive(PartialEq)]
 pub struct TimeRange {
     start: NaiveTime,
@@ -149,8 +170,8 @@ pub struct TimeRange {
 
 pub enum FSMState {
     Idle,
-    InRange ( usize ),
-    WaitNextRange ( usize ),
+    InRange(usize),
+    WaitNextRange(usize),
 }
 
 #[rtic::app(device = tm4c123x, peripherals = true)]
@@ -165,6 +186,8 @@ const APP: () = {
         rtc_int_pin: PD6<Input<PullUp>>,
         // ws2812
         leds: ws2812::Ws2812<Spi1T>,
+
+        rotary: RotaryT,
 
         next_or_current_range: usize,
         ranges: [TimeRange; 3],
@@ -250,6 +273,10 @@ const APP: () = {
 
         let mut leds = ws2812::Ws2812::new(spi_ws2812);
 
+        let rot_pinA = portb.pb1.into_pull_up_input();
+        let rot_pinB = portb.pb4.into_pull_up_input();
+        let rotary = Rotary::new(rot_pinA, rot_pinB);
+
         // GPIO for interrupt
         // SQW/INT pin wired to PD6
         let mut rtc_int_pin = portd.pd6.into_pull_up_input();
@@ -276,8 +303,8 @@ const APP: () = {
         )
         .unwrap();
 
-        let time = NaiveTime::from_hms(23,00 , 3);
-//        rtc.set_time(&time).unwrap();
+        let time = NaiveTime::from_hms(23, 00, 3);
+        //        rtc.set_time(&time).unwrap();
 
         let time = rtc.get_time().unwrap();
         cx.spawn.display_time(time);
@@ -309,7 +336,7 @@ const APP: () = {
 
         for (i, range) in ranges.iter().rev().enumerate() {
             if time < range.start {
-                state = FSMState::WaitNextRange( i) ;
+                state = FSMState::WaitNextRange(i);
                 debug_only! {
                     hprintln!(
                         "Waiting for next range to activate: {}:{}",
@@ -318,18 +345,8 @@ const APP: () = {
                     ).unwrap()
                 }
 
-                draw_text(
-                    &mut display,
-                    "Wait: ",
-                    1,
-                    0,
-                );
-                draw_text(
-                    &mut display,
-                    range.name,
-                    1,
-                    6,
-                );
+                draw_text(&mut display, "Wait: ", 1, 0);
+                draw_text(&mut display, range.name, 1, 6);
 
                 rtc.set_alarm1_hms(range.start).unwrap();
                 found = true;
@@ -337,25 +354,15 @@ const APP: () = {
             }
 
             if time >= range.start && time < range.end {
-                state = FSMState::InRange (i);
+                state = FSMState::InRange(i);
                 debug_only! {hprintln!("In range: {}:{}", range.start, range.end).unwrap()}
 
                 let data = [range.in_color; NUM_LEDS];
                 leds.write(data.iter().cloned()).unwrap();
 
-                draw_text(
-                    &mut display,
-                    "In: ",
-                    1,
-                    0,
-                );
+                draw_text(&mut display, "In: ", 1, 0);
 
-                draw_text(
-                    &mut display,
-                    range.name,
-                    1,
-                    4,
-                );
+                draw_text(&mut display, range.name, 1, 4);
 
                 rtc.set_alarm1_hms(range.end).unwrap();
                 found = true;
@@ -389,6 +396,7 @@ const APP: () = {
             ranges,
             next_or_current_range,
             state,
+            rotary,
         }
     }
 
@@ -400,16 +408,11 @@ const APP: () = {
 
         if let Some(new_state) = match cx.resources.state {
             FSMState::Idle => None,
-            FSMState::WaitNextRange (ref range) => {
+            FSMState::WaitNextRange(ref range) => {
                 debug_only! {hprintln!("Enter").unwrap()}
                 clear_line(&mut cx.resources.screen.1, 1);
 
-                draw_text(
-                    &mut cx.resources.screen.1,
-                    "In: ",
-                    1,
-                    0,
-                );
+                draw_text(&mut cx.resources.screen.1, "In: ", 1, 0);
 
                 draw_text(
                     &mut cx.resources.screen.1,
@@ -428,23 +431,18 @@ const APP: () = {
                     .set_alarm1_hms(cx.resources.ranges[*range].end)
                     .unwrap();
 
-                Some(FSMState::InRange (*range))
+                Some(FSMState::InRange(*range))
             }
 
-            FSMState::InRange (ref range) => {
+            FSMState::InRange(ref range) => {
                 debug_only! {hprintln!("Exit").unwrap()}
 
                 let data = [colors::GREEN; NUM_LEDS];
 
                 cx.resources.leds.write(data.iter().cloned()).unwrap();
-                draw_text(
-                    &mut cx.resources.screen.1,
-                    "Wait: ",
-                    1,
-                    0,
-                );
+                draw_text(&mut cx.resources.screen.1, "Wait: ", 1, 0);
 
-                if *range == cx.resources.ranges.len()-1 {
+                if *range == cx.resources.ranges.len() - 1 {
                     draw_text(
                         &mut cx.resources.screen.1,
                         cx.resources.ranges[0].name,
@@ -456,7 +454,7 @@ const APP: () = {
                         .rtc
                         .set_alarm1_hms(cx.resources.ranges[0].start)
                         .unwrap();
-                    Some(FSMState::WaitNextRange (0))
+                    Some(FSMState::WaitNextRange(0))
                 } else {
                     draw_text(
                         &mut cx.resources.screen.1,
@@ -469,7 +467,7 @@ const APP: () = {
                         .rtc
                         .set_alarm1_hms(cx.resources.ranges[*range + 1].start)
                         .unwrap();
-                    Some(FSMState::WaitNextRange (*range + 1))
+                    Some(FSMState::WaitNextRange(*range + 1))
                 }
             }
         } {
@@ -488,7 +486,8 @@ const APP: () = {
     fn display_time(mut cx: display_time::Context, time: NaiveTime) {
         cx.resources.screen.lock(|screen| {
             draw_hour(&mut screen.1, &time);
-            screen.0
+            screen
+                .0
                 .update_and_display_frame(&mut screen.2, &screen.1.buffer())
                 .unwrap();
             screen.0.sleep(&mut screen.2).unwrap();
@@ -536,13 +535,16 @@ const APP: () = {
     extern "C" {
         fn GPIOB();
     }
-
 };
 
 const FONT: embedded_graphics::fonts::Font24x32 = Font24x32;
 const FONT_SZ: Size = embedded_graphics::fonts::Font24x32::CHARACTER_SIZE;
 
-fn fill_line(display: &mut Display2in13, line: u8, color: embedded_graphics::pixelcolor::BinaryColor) {
+fn fill_line(
+    display: &mut Display2in13,
+    line: u8,
+    color: embedded_graphics::pixelcolor::BinaryColor,
+) {
     let style = primitive_style!(fill_color = color);
     let line = line as i32;
 
@@ -552,9 +554,9 @@ fn fill_line(display: &mut Display2in13, line: u8, color: embedded_graphics::pix
         Point::new(0, line * h),
         Point::new(display.size().width as i32, (line + 1) * h),
     )
-        .into_styled(style)
-        .draw(display)
-        .unwrap();
+    .into_styled(style)
+    .draw(display)
+    .unwrap();
 }
 
 fn clear_line(display: &mut Display2in13, line: u8) {

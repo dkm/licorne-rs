@@ -23,6 +23,9 @@ panic = "abort"
 
 [dependencies]
 ws2812-spi = "0.3"
+rotary-encoder-hal = "0.2"
+debouncr = "0.2.0"
+
 ##ws2812-spi = {git = "https://github.com/smart-leds-rs/ws2812-spi-rs"}
 ## tm4c123x-hal = {git = "https://github.com/thejpster/tm4c-hal.git", features = ["rt"]}
 ##tm4c123x-hal = "0.10"

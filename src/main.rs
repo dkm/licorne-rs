@@ -83,10 +83,10 @@ const NUM_CONV: [&str; 60] = [
 // PA5: SSI0
 //
 // PB0: EPD
-// PB1: Rotary Encoder
+// PB1: Rotary Encoder (pinA)
 // PB2: I2C0
 // PB3: I2C0
-// PB4: Rotary Encoder
+// PB4: Rotary Encoder (pinB)
 //
 // PC6: EPD
 //
@@ -273,8 +273,14 @@ const APP: () = {
 
         let mut leds = ws2812::Ws2812::new(spi_ws2812);
 
-        let rot_pinA = portb.pb1.into_pull_up_input();
-        let rot_pinB = portb.pb4.into_pull_up_input();
+        let mut rot_pinA = portb.pb1.into_pull_up_input();
+        rot_pinA.set_interrupt_mode(InterruptMode::EdgeBoth);
+        rot_pinA.clear_interrupt();
+
+        let mut rot_pinB = portb.pb4.into_pull_up_input();
+        rot_pinB.set_interrupt_mode(InterruptMode::EdgeBoth);
+        rot_pinB.clear_interrupt();
+
         let rotary = Rotary::new(rot_pinA, rot_pinB);
 
         // GPIO for interrupt
@@ -496,6 +502,35 @@ const APP: () = {
         debug_only! {hprintln!("refresh time with: {} {}", time.hour(), time.minute()).unwrap()}
     }
 
+    #[task(priority = 1)]
+    fn knob_turned(cx: knob_turned::Context, dir: Direction) {
+        match dir {
+            Direction::Clockwise => {
+                debug_only! {hprintln!("clockwise").unwrap()}
+            }
+            Direction::CounterClockwise => {
+                debug_only! {hprintln!("counter clockwise").unwrap()}
+            }
+            _ => (),
+        }
+    }
+
+    #[task(binds = GPIOB, resources = [rotary], spawn = [ knob_turned ])]
+    fn gpiob_rotary(cx: gpiob_rotary::Context) {
+        cx.resources.rotary.pin_a().clear_interrupt();
+        cx.resources.rotary.pin_b().clear_interrupt();
+
+        match cx.resources.rotary.update().unwrap() {
+            Direction::Clockwise => {
+                cx.spawn.knob_turned(Direction::Clockwise);
+            }
+            Direction::CounterClockwise => {
+                cx.spawn.knob_turned(Direction::CounterClockwise);
+            }
+            Direction::None => {}
+        }
+    }
+
     #[task(binds = GPIOD, resources = [rtc, rtc_int_pin], spawn = [display_time, handle_event_alarm] )]
     fn gpiod(mut cx: gpiod::Context) {
         let mut a1 = false;
@@ -528,12 +563,12 @@ const APP: () = {
         debug_only! {hprintln!("hep").unwrap()}
     }
 
-    // Use GPIOA/B as dispatch interrupt.
+    // Use some UARTs as dispatch interrupt.
     extern "C" {
-        fn GPIOA();
+        fn UART3();
     }
     extern "C" {
-        fn GPIOB();
+        fn UART4();
     }
 };
 

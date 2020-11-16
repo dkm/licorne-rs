@@ -23,7 +23,7 @@ panic = "abort"
 
 [dependencies]
 ws2812-spi = "0.3"
-rotary-encoder-hal = "0.2"
+rotary-encoder-hal = {git = "https://github.com/dkm/rotary-encoder-hal" , features = ["table-decoder"] }
 debouncr = "0.2.0"
 
 ##ws2812-spi = {git = "https://github.com/smart-leds-rs/ws2812-spi-rs"}

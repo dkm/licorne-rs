@@ -3,7 +3,6 @@
 #![no_main]
 #![no_std]
 
-extern crate embedded_hal as hal;
 
 //#[macro_use]
 extern crate cortex_m_rt;
@@ -19,10 +18,14 @@ extern crate tm4c123x_hal;
 extern crate tm4c_hal;
 extern crate ws2812_spi;
 
+use rtic::cyccnt::{Instant, U32Ext as _};
+
 use cortex_m_semihosting::{debug, hprintln};
 use panic_semihosting as _;
 
 use tm4c_hal::delay::Delay;
+
+use debouncr::{Debouncer, debounce_12, Edge, Repeat12};
 
 use embedded_graphics::{
     fonts::{Font24x32, Text},
@@ -87,6 +90,7 @@ const NUM_CONV: [&str; 60] = [
 // PB2: I2C0
 // PB3: I2C0
 // PB4: Rotary Encoder (pinB)
+// PB5: Toggle Switch (config mode)
 //
 // PC6: EPD
 //
@@ -97,10 +101,11 @@ const NUM_CONV: [&str; 60] = [
 // PD6: RTC / INT
 //
 // PE4: EPD
+use tm4c123x_hal::prelude::*;
 
 use tm4c123x_hal::{
     gpio::gpioa::{PA2, PA4, PA5},
-    gpio::gpiob::{PB0, PB1, PB2, PB3, PB4},
+    gpio::gpiob::{PB0, PB1, PB2, PB3, PB4, PB5},
     gpio::gpioc::PC6,
     gpio::gpiod::{PD0, PD1, PD2, PD3, PD6},
     gpio::gpioe::PE4,
@@ -174,9 +179,16 @@ pub enum FSMState {
     WaitNextRange(usize),
 }
 
-#[rtic::app(device = tm4c123x, peripherals = true)]
+pub enum OperatingMode {
+    Normal,
+    Configuration,
+}
+
+#[rtic::app(device = tm4c123x, peripherals = true, monotonic = rtic::cyccnt::CYCCNT)]
 const APP: () = {
     struct Resources {
+        mode: OperatingMode,
+
         // The RTC periph
         rtc: RtcT,
 
@@ -187,6 +199,9 @@ const APP: () = {
         // ws2812
         leds: ws2812::Ws2812<Spi1T>,
 
+        conf_switch : PB5<Input<PullUp>>,
+        conf_switch_state: Debouncer<u16, Repeat12>,
+
         rotary: RotaryT,
 
         next_or_current_range: usize,
@@ -194,7 +209,7 @@ const APP: () = {
         state: FSMState,
     }
 
-    #[init(spawn = [display_time])]
+    #[init(spawn = [display_time, poll_switch])]
     fn init(cx: init::Context) -> init::LateResources {
         // Alias peripherals
         let p: tm4c123x_hal::Peripherals = cx.device;
@@ -246,7 +261,8 @@ const APP: () = {
         let busy_pin = portb.pb0.into_floating_input();
 
         // Cortex-M peripherals
-        let cp: cortex_m::Peripherals = cx.core;
+        // : cortex_m::Peripherals
+        let cp = cx.core;
 
         let mut delay = Delay::new(cp.SYST, &clocks);
 
@@ -392,9 +408,17 @@ const APP: () = {
         epd.update_and_display_frame(&mut spi0, &display.buffer())
             .unwrap();
 
-        debug_only! {hprintln!("init").unwrap()}
+        let mut conf_switch = portb.pb5.into_pull_up_input();
+        conf_switch.set_interrupt_mode(InterruptMode::EdgeBoth);
+        conf_switch.clear_interrupt();
+
+        cx.spawn.poll_switch().unwrap();
+
+        debug_only! {hprintln!("init done").unwrap()}
 
         init::LateResources {
+            mode: OperatingMode::Normal,
+
             rtc,
             screen: (epd, display, spi0),
             rtc_int_pin,
@@ -403,7 +427,34 @@ const APP: () = {
             next_or_current_range,
             state,
             rotary,
+            conf_switch,
+            conf_switch_state: debounce_12(false),
         }
+    }
+
+     /// Regularly called task that polls the buttons and debounces them.
+    #[task(
+        resources = [conf_switch, conf_switch_state],
+        schedule = [poll_switch],
+    )]
+    fn poll_switch(ctx: poll_switch::Context) {
+        // Poll button
+        let pressed: bool = ctx.resources.conf_switch.is_low();
+
+        // Update state
+        let edge = ctx.resources.conf_switch_state.update(pressed);
+
+        // Dispatch event
+        // if edge == Some(Edge::Rising) {
+        //     ctx.spawn.button_pressed().unwrap();
+        // } else if edge == Some(Edge::Falling) {
+        //     ctx.spawn.button_released().unwrap();
+        // }
+
+        // Re-schedule the timer interrupt
+        ctx.schedule
+            .poll_switch(ctx.scheduled + 160_000_000.cycles())
+            .unwrap();
     }
 
     #[task(priority = 3, resources = [rtc, screen, leds, ranges, state, next_or_current_range])]
@@ -515,19 +566,29 @@ const APP: () = {
         }
     }
 
-    #[task(binds = GPIOB, resources = [rotary], spawn = [ knob_turned ])]
+    #[task(binds = GPIOB, resources = [rotary, mode, conf_switch], spawn = [ knob_turned ])]
     fn gpiob_rotary(cx: gpiob_rotary::Context) {
+
+        // whatever happens, clear these IT.
         cx.resources.rotary.pin_a().clear_interrupt();
         cx.resources.rotary.pin_b().clear_interrupt();
+        cx.resources.conf_switch.clear_interrupt();
 
-        match cx.resources.rotary.update().unwrap() {
-            Direction::Clockwise => {
-                cx.spawn.knob_turned(Direction::Clockwise);
+        match *cx.resources.mode {
+            OperatingMode::Normal => {
             }
-            Direction::CounterClockwise => {
-                cx.spawn.knob_turned(Direction::CounterClockwise);
+
+            OperatingMode::Configuration => {
+                match cx.resources.rotary.update().unwrap() {
+                    Direction::Clockwise => {
+                        cx.spawn.knob_turned(Direction::Clockwise);
+                    }
+                    Direction::CounterClockwise => {
+                        cx.spawn.knob_turned(Direction::CounterClockwise);
+                    }
+                    Direction::None => {}
+                }
             }
-            Direction::None => {}
         }
     }
 

@@ -73,7 +73,7 @@ macro_rules! debug_only {
     ($code:block) => {};
 }
 
-const NUM_LEDS: usize = 1;
+const NUM_LEDS: usize = 8;
 
 // cheap/dumb way to convert time fields to strings.
 const NUM_CONV: [&str; 60] = [
@@ -217,10 +217,17 @@ pub enum FSMState {
     WaitNextRange(usize),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OperatingMode {
     Normal,
     Configuration,
+}
+
+pub struct Screen {
+    epd: EpdT,
+    display: Display2in13,
+    spi: Spi0T,
+    delay: SimpleAsmDelay,
 }
 
 // At 80Mhz, this is ~2ms
@@ -236,11 +243,12 @@ const APP: () = {
         rtc: RtcT,
 
         // e-ink
-        screen: (EpdT, Display2in13, Spi0T),
+        screen: Screen,
 
         rtc_int_pin: PD6<Input<PullUp>>,
         // ws2812
         leds: ws2812::Ws2812<Spi1T>,
+        leds_data: [RGB8; NUM_LEDS],
 
         conf_switch: PB5<Input<PullUp>>,
         conf_switch_state: DebouncerStateful<u16, Repeat12>,
@@ -253,7 +261,7 @@ const APP: () = {
         state: FSMState,
     }
 
-    #[init(spawn = [display_time])]
+    #[init(spawn = [display_time, change_mode, set_leds])]
     fn init(mut cx: init::Context) -> init::LateResources {
         // Initialize (enable) the monotonic timer (CYCCNT)
         cx.core.DCB.enable_trace();
@@ -424,8 +432,7 @@ const APP: () = {
                 state = FSMState::InRange(i);
                 debug_only! {hprintln!("In range: {}:{}", range.start, range.end).unwrap()}
 
-                let data = [range.in_color; NUM_LEDS];
-                leds.write(data.iter().cloned()).unwrap();
+                cx.spawn.set_leds(0, 1, range.in_color);
 
                 draw_text(&mut display, "In: ", 1, 0);
 
@@ -457,33 +464,15 @@ const APP: () = {
         conf_switch.set_interrupt_mode(InterruptMode::EdgeBoth);
         conf_switch.clear_interrupt();
 
-        let now = Instant::now();
-        hprintln!(
-            "would start poll_switch at {:?}",
-            cx.start + POLL_SWITCH_PERIOD.cycles()
-        )
-        .unwrap();
-
-        // cx.schedule
-        //     .poll_switch(cx.start + POLL_SWITCH_PERIOD.cycles())
-        //     .unwrap();
-
         let conf_switch_state = debounce_stateful_12(conf_switch.is_high());
+
         let mode = if conf_switch.is_high() {
             OperatingMode::Configuration
         } else {
             OperatingMode::Normal
         };
 
-        match mode {
-            OperatingMode::Configuration => {
-                rotary.pin_a().clear_interrupt();
-                rotary.pin_a().set_interrupt_mode(InterruptMode::EdgeBoth);
-                rotary.pin_b().clear_interrupt();
-                rotary.pin_b().set_interrupt_mode(InterruptMode::EdgeBoth);
-            }
-            _ => (),
-        }
+        cx.spawn.change_mode(mode.clone());
 
         debug_only! {hprintln!("init done, mode is {:?}", mode).unwrap()}
 
@@ -491,9 +480,16 @@ const APP: () = {
             mode,
 
             rtc,
-            screen: (epd, display, spi0),
+            screen: Screen {
+                epd,
+                display,
+                spi: spi0,
+                delay,
+            },
             rtc_int_pin,
             leds,
+            leds_data: [colors::BLACK; NUM_LEDS],
+
             ranges,
             next_or_current_range,
             state,
@@ -504,10 +500,61 @@ const APP: () = {
         }
     }
 
+    #[task(
+        resources = [mode, rotary, screen],
+    )]
+    fn change_mode(mut ctx: change_mode::Context, mode: OperatingMode) {
+        if *ctx.resources.mode == mode {
+            return;
+        }
+        debug_only! {hprintln!("change mode from {:?} to {:?}", *ctx.resources.mode, mode).unwrap()}
+        *ctx.resources.mode = mode;
+
+        match *ctx.resources.mode {
+            OperatingMode::Normal => {
+                ctx.resources.screen.lock(|screen| {
+                    screen
+                        .epd
+                        .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLUT::FULL)
+                        .unwrap();
+                });
+                ctx.resources.rotary.pin_a().clear_interrupt();
+                ctx.resources
+                    .rotary
+                    .pin_a()
+                    .set_interrupt_mode(InterruptMode::Disabled);
+                ctx.resources.rotary.pin_b().clear_interrupt();
+                ctx.resources
+                    .rotary
+                    .pin_b()
+                    .set_interrupt_mode(InterruptMode::Disabled);
+            }
+            OperatingMode::Configuration => {
+                ctx.resources.screen.lock(|screen| {
+                    screen
+                        .epd
+                        .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLUT::QUICK)
+                        .unwrap();
+                });
+                ctx.resources.rotary.pin_a().clear_interrupt();
+                ctx.resources
+                    .rotary
+                    .pin_a()
+                    .set_interrupt_mode(InterruptMode::EdgeBoth);
+                ctx.resources.rotary.pin_b().clear_interrupt();
+                ctx.resources
+                    .rotary
+                    .pin_b()
+                    .set_interrupt_mode(InterruptMode::EdgeBoth);
+            }
+        }
+    }
+
     /// Regularly called task that polls the buttons and debounces them.
     #[task(
         resources = [mode, rotary, conf_switch, conf_switch_state, conf_switch_debounce_cnt],
         schedule = [poll_switch],
+        spawn = [change_mode]
     )]
     fn poll_switch(ctx: poll_switch::Context) {
         // Poll button
@@ -521,34 +568,10 @@ const APP: () = {
         // Dispatch event
         if edge == Some(Edge::Rising) {
             *ctx.resources.conf_switch_debounce_cnt = 0;
-            *ctx.resources.mode = OperatingMode::Configuration;
-            debug_only! {hprintln!("Config mode").unwrap()}
-
-            ctx.resources.rotary.pin_a().clear_interrupt();
-            ctx.resources
-                .rotary
-                .pin_a()
-                .set_interrupt_mode(InterruptMode::EdgeBoth);
-            ctx.resources.rotary.pin_b().clear_interrupt();
-            ctx.resources
-                .rotary
-                .pin_b()
-                .set_interrupt_mode(InterruptMode::EdgeBoth);
+            ctx.spawn.change_mode(OperatingMode::Configuration);
         } else if edge == Some(Edge::Falling) {
             *ctx.resources.conf_switch_debounce_cnt = 0;
-            debug_only! {hprintln!("Normal mode").unwrap()}
-            *ctx.resources.mode = OperatingMode::Normal;
-
-            ctx.resources.rotary.pin_a().clear_interrupt();
-            ctx.resources
-                .rotary
-                .pin_a()
-                .set_interrupt_mode(InterruptMode::Disabled);
-            ctx.resources.rotary.pin_b().clear_interrupt();
-            ctx.resources
-                .rotary
-                .pin_b()
-                .set_interrupt_mode(InterruptMode::Disabled);
+            ctx.spawn.change_mode(OperatingMode::Normal);
         } else if *ctx.resources.conf_switch_debounce_cnt < DEBOUNCE_SAMPLE_CNT {
             // Re-schedule the timer interrupt to get enough samples
             ctx.schedule
@@ -559,30 +582,55 @@ const APP: () = {
         }
     }
 
-    #[task(priority = 3, resources = [rtc, screen, leds, ranges, state, next_or_current_range])]
+    #[task(priority = 3, resources = [leds, leds_data])]
+    fn refresh_leds(cx: refresh_leds::Context) {
+        cx.resources
+            .leds
+            .write(cx.resources.leds_data.iter().cloned())
+            .unwrap();
+    }
+
+    #[task(priority = 3, resources = [leds_data], spawn = [refresh_leds])]
+    fn rotate_leds(cx: rotate_leds::Context, rotate_right: bool, num: usize) {
+        if rotate_right {
+            cx.resources.leds_data[0..].rotate_right(num);
+        } else {
+            cx.resources.leds_data[0..].rotate_left(num);
+        }
+
+        cx.spawn.refresh_leds();
+    }
+
+    #[task(priority = 3, resources = [leds_data], spawn = [refresh_leds])]
+    fn set_leds(cx: set_leds::Context, start_index: usize, number_of_leds: usize, color: RGB8) {
+        for led in &mut cx.resources.leds_data[start_index..start_index + number_of_leds] {
+            *led = color;
+        }
+        cx.spawn.refresh_leds();
+    }
+
+    #[task(priority = 3, spawn = [set_leds], resources = [rtc, screen, ranges, state, next_or_current_range])]
     fn handle_event_alarm(mut cx: handle_event_alarm::Context, time: NaiveTime) {
         debug_only! {hprintln!("handle event alarm! {} {}", time.hour(), time.minute()).unwrap()}
 
-        clear_line(&mut cx.resources.screen.1, 1);
+        clear_line(&mut cx.resources.screen.display, 1);
 
         if let Some(new_state) = match cx.resources.state {
             FSMState::Idle => None,
             FSMState::WaitNextRange(ref range) => {
                 debug_only! {hprintln!("Enter").unwrap()}
-                clear_line(&mut cx.resources.screen.1, 1);
+                clear_line(&mut cx.resources.screen.display, 1);
 
-                draw_text(&mut cx.resources.screen.1, "In: ", 1, 0);
+                draw_text(&mut cx.resources.screen.display, "In: ", 1, 0);
 
                 draw_text(
-                    &mut cx.resources.screen.1,
+                    &mut cx.resources.screen.display,
                     cx.resources.ranges[*range].name,
                     1,
                     4,
                 );
-
-                let data = [cx.resources.ranges[*range].in_color; NUM_LEDS];
-
-                cx.resources.leds.write(data.iter().cloned()).unwrap();
+                cx.spawn
+                    .set_leds(0, 1, cx.resources.ranges[*range].in_color);
 
                 debug_only! {hprintln!("Time: {}, Alarm :{}", time, cx.resources.ranges[*range].end).unwrap()}
                 cx.resources
@@ -596,14 +644,13 @@ const APP: () = {
             FSMState::InRange(ref range) => {
                 debug_only! {hprintln!("Exit").unwrap()}
 
-                let data = [colors::GREEN; NUM_LEDS];
+                cx.spawn.set_leds(0, 1, colors::GREEN);
 
-                cx.resources.leds.write(data.iter().cloned()).unwrap();
-                draw_text(&mut cx.resources.screen.1, "Wait: ", 1, 0);
+                draw_text(&mut cx.resources.screen.display, "Wait: ", 1, 0);
 
                 if *range == cx.resources.ranges.len() - 1 {
                     draw_text(
-                        &mut cx.resources.screen.1,
+                        &mut cx.resources.screen.display,
                         cx.resources.ranges[0].name,
                         1,
                         6,
@@ -616,7 +663,7 @@ const APP: () = {
                     Some(FSMState::WaitNextRange(0))
                 } else {
                     draw_text(
-                        &mut cx.resources.screen.1,
+                        &mut cx.resources.screen.display,
                         cx.resources.ranges[*range + 1].name,
                         1,
                         6,
@@ -644,32 +691,32 @@ const APP: () = {
     #[task(priority = 1, resources = [leds, rtc, screen])]
     fn display_time(mut cx: display_time::Context, time: NaiveTime) {
         cx.resources.screen.lock(|screen| {
-            draw_hour(&mut screen.1, &time);
+            draw_hour(&mut screen.display, &time);
             screen
-                .0
-                .update_and_display_frame(&mut screen.2, &screen.1.buffer())
+                .epd
+                .update_and_display_frame(&mut screen.spi, &screen.display.buffer())
                 .unwrap();
-            screen.0.sleep(&mut screen.2).unwrap();
+            screen.epd.sleep(&mut screen.spi).unwrap();
         });
 
         debug_only! {hprintln!("refresh time with: {} {}", time.hour(), time.minute()).unwrap()}
     }
 
-    #[task(priority = 1)]
+    #[task(priority = 1, spawn = [display_time, rotate_leds], resources =[rtc])]
     fn knob_turned(cx: knob_turned::Context, dir: Direction) {
         match dir {
             Direction::Clockwise => {
-                debug_only! {hprintln!("clockwise").unwrap()}
+                cx.spawn.rotate_leds(true, 1);
             }
             Direction::CounterClockwise => {
-                debug_only! {hprintln!("counter clockwise").unwrap()}
+                cx.spawn.rotate_leds(false, 1);
             }
             _ => (),
         }
     }
 
     #[task(binds = GPIOB, resources = [rotary, mode, conf_switch], spawn = [ knob_turned, poll_switch ])]
-    fn gpiob_rotary(cx: gpiob_rotary::Context) {
+    fn gpiob_rotary_switch(cx: gpiob_rotary_switch::Context) {
         // whatever happens, clear these ITs.
         cx.resources.rotary.pin_a().clear_interrupt();
         cx.resources.rotary.pin_b().clear_interrupt();
@@ -681,19 +728,17 @@ const APP: () = {
         }
 
         match *cx.resources.mode {
-            OperatingMode::Normal => {
-                debug_only! {hprintln!("nothing to do ?").unwrap()}
-            }
+            OperatingMode::Normal => (),
 
-            OperatingMode::Configuration => match cx.resources.rotary.update().unwrap() {
-                Direction::Clockwise => {
-                    cx.spawn.knob_turned(Direction::Clockwise);
+            OperatingMode::Configuration => {
+                let dir = cx.resources.rotary.update().unwrap();
+                match dir {
+                    Direction::Clockwise | Direction::CounterClockwise => {
+                        cx.spawn.knob_turned(dir);
+                    }
+                    Direction::None => {}
                 }
-                Direction::CounterClockwise => {
-                    cx.spawn.knob_turned(Direction::CounterClockwise);
-                }
-                Direction::None => {}
-            },
+            }
         }
     }
 

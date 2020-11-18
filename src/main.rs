@@ -3,7 +3,6 @@
 #![no_main]
 #![no_std]
 
-
 //#[macro_use]
 extern crate cortex_m_rt;
 
@@ -20,12 +19,12 @@ extern crate ws2812_spi;
 
 use rtic::cyccnt::{Instant, U32Ext as _};
 
+use embedded_hal::blocking::delay::{DelayMs, DelayUs};
+
 use cortex_m_semihosting::{debug, hprintln};
 use panic_semihosting as _;
 
-use tm4c_hal::delay::Delay;
-
-use debouncr::{Debouncer, debounce_12, Edge, Repeat12};
+use debouncr::{debounce_stateful_12, DebouncerStateful, Edge, Repeat12};
 
 use embedded_graphics::{
     fonts::{Font24x32, Text},
@@ -37,13 +36,16 @@ use embedded_graphics::{
     text_style,
 };
 
+use cortex_m::{
+    interrupt::{free, Mutex},
+    peripheral::DWT,
+};
 use epd_waveshare::{
     epd2in13_v2::{Display2in13, EPD2in13},
     graphics::{Display, DisplayRotation},
     prelude::*,
 };
 
-use cortex_m::interrupt::{free, Mutex};
 use cortex_m_rt::{entry, exception};
 use cortex_m_semihosting::hio;
 
@@ -81,6 +83,42 @@ const NUM_CONV: [&str; 60] = [
     "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59",
 ];
 
+struct SimpleAsmDelay {
+    freq: u32,
+}
+
+impl DelayUs<u32> for SimpleAsmDelay {
+    fn delay_us(&mut self, us: u32) {
+        cortex_m::asm::delay(self.freq * us / 1_000_000)
+    }
+}
+impl DelayMs<u16> for SimpleAsmDelay {
+    fn delay_ms(&mut self, ms: u16) {
+        self.delay_ms(cast::u32(ms));
+    }
+}
+impl DelayMs<u8> for SimpleAsmDelay {
+    fn delay_ms(&mut self, ms: u8) {
+        self.delay_ms(cast::u32(ms));
+    }
+}
+
+impl DelayMs<u32> for SimpleAsmDelay {
+    fn delay_ms(&mut self, ms: u32) {
+        self.delay_us(ms * 1_000);
+    }
+}
+impl DelayUs<u16> for SimpleAsmDelay {
+    fn delay_us(&mut self, us: u16) {
+        self.delay_us(cast::u32(us))
+    }
+}
+
+impl DelayUs<u8> for SimpleAsmDelay {
+    fn delay_us(&mut self, us: u8) {
+        self.delay_us(cast::u32(us))
+    }
+}
 // PA2: SSI0
 // PA4: SSI0
 // PA5: SSI0
@@ -179,10 +217,15 @@ pub enum FSMState {
     WaitNextRange(usize),
 }
 
+#[derive(Debug)]
 pub enum OperatingMode {
     Normal,
     Configuration,
 }
+
+// At 80Mhz, this is ~2ms
+const POLL_SWITCH_PERIOD: u32 = 80_000;
+const DEBOUNCE_SAMPLE_CNT: u8 = 12;
 
 #[rtic::app(device = tm4c123x, peripherals = true, monotonic = rtic::cyccnt::CYCCNT)]
 const APP: () = {
@@ -199,8 +242,9 @@ const APP: () = {
         // ws2812
         leds: ws2812::Ws2812<Spi1T>,
 
-        conf_switch : PB5<Input<PullUp>>,
-        conf_switch_state: Debouncer<u16, Repeat12>,
+        conf_switch: PB5<Input<PullUp>>,
+        conf_switch_state: DebouncerStateful<u16, Repeat12>,
+        conf_switch_debounce_cnt: u8,
 
         rotary: RotaryT,
 
@@ -209,8 +253,14 @@ const APP: () = {
         state: FSMState,
     }
 
-    #[init(spawn = [display_time, poll_switch])]
-    fn init(cx: init::Context) -> init::LateResources {
+    #[init(spawn = [display_time])]
+    fn init(mut cx: init::Context) -> init::LateResources {
+        // Initialize (enable) the monotonic timer (CYCCNT)
+        cx.core.DCB.enable_trace();
+        // required on Cortex-M7 devices that software lock the DWT (e.g. STM32F7)
+        DWT::unlock();
+        cx.core.DWT.enable_cycle_counter();
+
         // Alias peripherals
         let p: tm4c123x_hal::Peripherals = cx.device;
 
@@ -264,7 +314,7 @@ const APP: () = {
         // : cortex_m::Peripherals
         let cp = cx.core;
 
-        let mut delay = Delay::new(cp.SYST, &clocks);
+        let mut delay = SimpleAsmDelay { freq: 80_000_000 };
 
         let mut epd =
             EPD2in13::new(&mut spi0, cs_pin, busy_pin, dc_pin, rst_pin, &mut delay).unwrap();
@@ -290,14 +340,9 @@ const APP: () = {
         let mut leds = ws2812::Ws2812::new(spi_ws2812);
 
         let mut rot_pinA = portb.pb1.into_pull_up_input();
-        rot_pinA.set_interrupt_mode(InterruptMode::EdgeBoth);
-        rot_pinA.clear_interrupt();
-
         let mut rot_pinB = portb.pb4.into_pull_up_input();
-        rot_pinB.set_interrupt_mode(InterruptMode::EdgeBoth);
-        rot_pinB.clear_interrupt();
 
-        let rotary = Rotary::new(rot_pinA, rot_pinB);
+        let mut rotary = Rotary::new(rot_pinA, rot_pinB);
 
         // GPIO for interrupt
         // SQW/INT pin wired to PD6
@@ -412,12 +457,38 @@ const APP: () = {
         conf_switch.set_interrupt_mode(InterruptMode::EdgeBoth);
         conf_switch.clear_interrupt();
 
-        cx.spawn.poll_switch().unwrap();
+        let now = Instant::now();
+        hprintln!(
+            "would start poll_switch at {:?}",
+            cx.start + POLL_SWITCH_PERIOD.cycles()
+        )
+        .unwrap();
 
-        debug_only! {hprintln!("init done").unwrap()}
+        // cx.schedule
+        //     .poll_switch(cx.start + POLL_SWITCH_PERIOD.cycles())
+        //     .unwrap();
+
+        let conf_switch_state = debounce_stateful_12(conf_switch.is_high());
+        let mode = if conf_switch.is_high() {
+            OperatingMode::Configuration
+        } else {
+            OperatingMode::Normal
+        };
+
+        match mode {
+            OperatingMode::Configuration => {
+                rotary.pin_a().clear_interrupt();
+                rotary.pin_a().set_interrupt_mode(InterruptMode::EdgeBoth);
+                rotary.pin_b().clear_interrupt();
+                rotary.pin_b().set_interrupt_mode(InterruptMode::EdgeBoth);
+            }
+            _ => (),
+        }
+
+        debug_only! {hprintln!("init done, mode is {:?}", mode).unwrap()}
 
         init::LateResources {
-            mode: OperatingMode::Normal,
+            mode,
 
             rtc,
             screen: (epd, display, spi0),
@@ -428,33 +499,64 @@ const APP: () = {
             state,
             rotary,
             conf_switch,
-            conf_switch_state: debounce_12(false),
+            conf_switch_state,
+            conf_switch_debounce_cnt: 0,
         }
     }
 
-     /// Regularly called task that polls the buttons and debounces them.
+    /// Regularly called task that polls the buttons and debounces them.
     #[task(
-        resources = [conf_switch, conf_switch_state],
+        resources = [mode, rotary, conf_switch, conf_switch_state, conf_switch_debounce_cnt],
         schedule = [poll_switch],
     )]
     fn poll_switch(ctx: poll_switch::Context) {
         // Poll button
-        let pressed: bool = ctx.resources.conf_switch.is_low();
+        let pressed: bool = ctx.resources.conf_switch.is_high();
 
         // Update state
         let edge = ctx.resources.conf_switch_state.update(pressed);
 
-        // Dispatch event
-        // if edge == Some(Edge::Rising) {
-        //     ctx.spawn.button_pressed().unwrap();
-        // } else if edge == Some(Edge::Falling) {
-        //     ctx.spawn.button_released().unwrap();
-        // }
+        *ctx.resources.conf_switch_debounce_cnt += 1;
 
-        // Re-schedule the timer interrupt
-        ctx.schedule
-            .poll_switch(ctx.scheduled + 160_000_000.cycles())
-            .unwrap();
+        // Dispatch event
+        if edge == Some(Edge::Rising) {
+            *ctx.resources.conf_switch_debounce_cnt = 0;
+            *ctx.resources.mode = OperatingMode::Configuration;
+            debug_only! {hprintln!("Config mode").unwrap()}
+
+            ctx.resources.rotary.pin_a().clear_interrupt();
+            ctx.resources
+                .rotary
+                .pin_a()
+                .set_interrupt_mode(InterruptMode::EdgeBoth);
+            ctx.resources.rotary.pin_b().clear_interrupt();
+            ctx.resources
+                .rotary
+                .pin_b()
+                .set_interrupt_mode(InterruptMode::EdgeBoth);
+        } else if edge == Some(Edge::Falling) {
+            *ctx.resources.conf_switch_debounce_cnt = 0;
+            debug_only! {hprintln!("Normal mode").unwrap()}
+            *ctx.resources.mode = OperatingMode::Normal;
+
+            ctx.resources.rotary.pin_a().clear_interrupt();
+            ctx.resources
+                .rotary
+                .pin_a()
+                .set_interrupt_mode(InterruptMode::Disabled);
+            ctx.resources.rotary.pin_b().clear_interrupt();
+            ctx.resources
+                .rotary
+                .pin_b()
+                .set_interrupt_mode(InterruptMode::Disabled);
+        } else if *ctx.resources.conf_switch_debounce_cnt < DEBOUNCE_SAMPLE_CNT {
+            // Re-schedule the timer interrupt to get enough samples
+            ctx.schedule
+                .poll_switch(ctx.scheduled + POLL_SWITCH_PERIOD.cycles())
+                .unwrap();
+        } else {
+            *ctx.resources.conf_switch_debounce_cnt = 0;
+        }
     }
 
     #[task(priority = 3, resources = [rtc, screen, leds, ranges, state, next_or_current_range])]
@@ -566,29 +668,32 @@ const APP: () = {
         }
     }
 
-    #[task(binds = GPIOB, resources = [rotary, mode, conf_switch], spawn = [ knob_turned ])]
+    #[task(binds = GPIOB, resources = [rotary, mode, conf_switch], spawn = [ knob_turned, poll_switch ])]
     fn gpiob_rotary(cx: gpiob_rotary::Context) {
-
-        // whatever happens, clear these IT.
+        // whatever happens, clear these ITs.
         cx.resources.rotary.pin_a().clear_interrupt();
         cx.resources.rotary.pin_b().clear_interrupt();
-        cx.resources.conf_switch.clear_interrupt();
+
+        if cx.resources.conf_switch.get_interrupt_status() {
+            debug_only! {hprintln!("switch IT raised!").unwrap()}
+            cx.resources.conf_switch.clear_interrupt();
+            cx.spawn.poll_switch();
+        }
 
         match *cx.resources.mode {
             OperatingMode::Normal => {
+                debug_only! {hprintln!("nothing to do ?").unwrap()}
             }
 
-            OperatingMode::Configuration => {
-                match cx.resources.rotary.update().unwrap() {
-                    Direction::Clockwise => {
-                        cx.spawn.knob_turned(Direction::Clockwise);
-                    }
-                    Direction::CounterClockwise => {
-                        cx.spawn.knob_turned(Direction::CounterClockwise);
-                    }
-                    Direction::None => {}
+            OperatingMode::Configuration => match cx.resources.rotary.update().unwrap() {
+                Direction::Clockwise => {
+                    cx.spawn.knob_turned(Direction::Clockwise);
                 }
-            }
+                Direction::CounterClockwise => {
+                    cx.spawn.knob_turned(Direction::CounterClockwise);
+                }
+                Direction::None => {}
+            },
         }
     }
 

@@ -19,7 +19,10 @@ extern crate ws2812_spi;
 
 use rtic::cyccnt::{Instant, U32Ext as _};
 
-use embedded_hal::blocking::delay::{DelayMs, DelayUs};
+use embedded_hal::{
+    blocking::delay::{DelayMs, DelayUs},
+    digital::v1::InputPin,
+};
 
 use cortex_m_semihosting::{debug, hprintln};
 use panic_semihosting as _;
@@ -129,6 +132,8 @@ impl DelayUs<u8> for SimpleAsmDelay {
 // PB3: I2C0
 // PB4: Rotary Encoder (pinB)
 // PB5: Toggle Switch (config mode)
+// PB6:
+// PB7: Rotary switch
 //
 // PC6: EPD
 //
@@ -143,7 +148,7 @@ use tm4c123x_hal::prelude::*;
 
 use tm4c123x_hal::{
     gpio::gpioa::{PA2, PA4, PA5},
-    gpio::gpiob::{PB0, PB1, PB2, PB3, PB4, PB5},
+    gpio::gpiob::{PB0, PB1, PB2, PB3, PB4, PB5, PB7},
     gpio::gpioc::PC6,
     gpio::gpiod::{PD0, PD1, PD2, PD3, PD6},
     gpio::gpioe::PE4,
@@ -230,6 +235,34 @@ pub struct Screen {
     delay: SimpleAsmDelay,
 }
 
+pub struct Switch<P>
+where
+    P: InputPin,
+{
+    pin: P,
+    debouncer: DebouncerStateful<u16, Repeat12>,
+    sample_count: u8,
+}
+
+impl<P> Switch<P>
+where
+    P: InputPin,
+{
+    pub fn new(pin: P, state: bool) -> Switch<P> {
+        Switch {
+            pin,
+            debouncer: debounce_stateful_12(state),
+            sample_count: 0,
+        }
+    }
+}
+
+type ToggleSwitchPinT = PB5<Input<PullUp>>;
+type ToggleSwitchT = Switch<ToggleSwitchPinT>;
+
+type RotarySwitchPinT = PB7<Input<PullUp>>;
+type RotarySwitchT = Switch<RotarySwitchPinT>;
+
 // At 80Mhz, this is ~2ms
 const POLL_SWITCH_PERIOD: u32 = 80_000;
 const DEBOUNCE_SAMPLE_CNT: u8 = 12;
@@ -246,13 +279,13 @@ const APP: () = {
         screen: Screen,
 
         rtc_int_pin: PD6<Input<PullUp>>,
+
         // ws2812
         leds: ws2812::Ws2812<Spi1T>,
         leds_data: [RGB8; NUM_LEDS],
 
-        conf_switch: PB5<Input<PullUp>>,
-        conf_switch_state: DebouncerStateful<u16, Repeat12>,
-        conf_switch_debounce_cnt: u8,
+        toggle_switch: ToggleSwitchT,
+        rotary_switch: RotarySwitchT,
 
         rotary: RotaryT,
 
@@ -460,24 +493,41 @@ const APP: () = {
         epd.update_and_display_frame(&mut spi0, &display.buffer())
             .unwrap();
 
-        let mut conf_switch = portb.pb5.into_pull_up_input();
-        conf_switch.set_interrupt_mode(InterruptMode::EdgeBoth);
-        conf_switch.clear_interrupt();
+        let mut rotary_pin = portb.pb7.into_pull_up_input();
+        let init_state = rotary_pin.is_high();
+        let mut rotary_switch = RotarySwitchT::new(rotary_pin, init_state);
+        rotary_switch
+            .pin
+            .set_interrupt_mode(InterruptMode::EdgeBoth);
+        rotary_switch.pin.clear_interrupt();
 
-        let conf_switch_state = debounce_stateful_12(conf_switch.is_high());
+        // switch is using PUR, is_low() <=> pressed <=> 'true' state
+        let mut toggle_switch = ToggleSwitchT::new(portb.pb5.into_pull_up_input(), false);
+        toggle_switch
+            .pin
+            .set_interrupt_mode(InterruptMode::EdgeBoth);
+        toggle_switch.pin.clear_interrupt();
 
-        let mode = if conf_switch.is_high() {
+        let switch_state = toggle_switch.pin.is_high();
+
+        let mode = if switch_state {
             OperatingMode::Configuration
         } else {
             OperatingMode::Normal
         };
 
-        cx.spawn.change_mode(mode.clone());
+        cx.spawn.change_mode(mode);
 
-        debug_only! {hprintln!("init done, mode is {:?}", mode).unwrap()}
+        debug_only! {
+            hprintln!("init done, mode will be {:?}, switch is {:?} debouncer is {:?}",
+                      mode,
+                      switch_state,
+                      toggle_switch.debouncer.is_high())
+                .unwrap()
+        }
 
         init::LateResources {
-            mode,
+            mode: OperatingMode::Normal,
 
             rtc,
             screen: Screen {
@@ -494,9 +544,9 @@ const APP: () = {
             next_or_current_range,
             state,
             rotary,
-            conf_switch,
-            conf_switch_state,
-            conf_switch_debounce_cnt: 0,
+
+            toggle_switch,
+            rotary_switch,
         }
     }
 
@@ -504,10 +554,11 @@ const APP: () = {
         resources = [mode, rotary, screen],
     )]
     fn change_mode(mut ctx: change_mode::Context, mode: OperatingMode) {
+        debug_only! {hprintln!("change mode from {:?} to {:?}", *ctx.resources.mode, mode).unwrap()}
         if *ctx.resources.mode == mode {
             return;
         }
-        debug_only! {hprintln!("change mode from {:?} to {:?}", *ctx.resources.mode, mode).unwrap()}
+
         *ctx.resources.mode = mode;
 
         match *ctx.resources.mode {
@@ -550,35 +601,84 @@ const APP: () = {
         }
     }
 
-    /// Regularly called task that polls the buttons and debounces them.
     #[task(
-        resources = [mode, rotary, conf_switch, conf_switch_state, conf_switch_debounce_cnt],
-        schedule = [poll_switch],
+        resources = [mode, toggle_switch],
+        schedule = [poll_toggle_switch],
         spawn = [change_mode]
     )]
-    fn poll_switch(ctx: poll_switch::Context) {
+    fn poll_toggle_switch(ctx: poll_toggle_switch::Context) {
         // Poll button
-        let pressed: bool = ctx.resources.conf_switch.is_high();
+        let pressed: bool = ctx.resources.toggle_switch.pin.is_high();
 
         // Update state
-        let edge = ctx.resources.conf_switch_state.update(pressed);
-
-        *ctx.resources.conf_switch_debounce_cnt += 1;
+        let edge = ctx.resources.toggle_switch.debouncer.update(pressed);
+        ctx.resources.toggle_switch.sample_count += 1;
 
         // Dispatch event
         if edge == Some(Edge::Rising) {
-            *ctx.resources.conf_switch_debounce_cnt = 0;
+            ctx.resources.toggle_switch.sample_count = 0;
             ctx.spawn.change_mode(OperatingMode::Configuration);
         } else if edge == Some(Edge::Falling) {
-            *ctx.resources.conf_switch_debounce_cnt = 0;
+            ctx.resources.toggle_switch.sample_count = 0;
             ctx.spawn.change_mode(OperatingMode::Normal);
-        } else if *ctx.resources.conf_switch_debounce_cnt < DEBOUNCE_SAMPLE_CNT {
+        } else if ctx.resources.toggle_switch.sample_count <= DEBOUNCE_SAMPLE_CNT {
             // Re-schedule the timer interrupt to get enough samples
             ctx.schedule
-                .poll_switch(ctx.scheduled + POLL_SWITCH_PERIOD.cycles())
+                .poll_toggle_switch(ctx.scheduled + POLL_SWITCH_PERIOD.cycles())
                 .unwrap();
         } else {
-            *ctx.resources.conf_switch_debounce_cnt = 0;
+            debug_only! {hprintln!("nothing ? {:?} {:?}", pressed, ctx.resources.toggle_switch.pin.is_high()).unwrap()}
+
+            debug_only! {
+                hprintln!("mode is {:?}, switch is {:?} debouncer is {:?}",
+                          ctx.resources.mode,
+                          ctx.resources.toggle_switch.pin.is_high(),
+                          ctx.resources.toggle_switch.debouncer.is_high())
+                    .unwrap()
+            }
+
+            ctx.resources.toggle_switch.sample_count = 0;
+        }
+    }
+
+    #[task(
+        resources = [mode, rotary_switch],
+        schedule = [poll_rotary_switch],
+        spawn = [change_mode]
+    )]
+    fn poll_rotary_switch(ctx: poll_rotary_switch::Context) {
+        // Poll button
+        let pressed: bool = ctx.resources.rotary_switch.pin.is_low();
+
+        // Update state
+        let edge = ctx.resources.rotary_switch.debouncer.update(pressed);
+        ctx.resources.rotary_switch.sample_count += 1;
+
+        // Dispatch event
+        if edge == Some(Edge::Rising) {
+            debug_only! {hprintln!("rotary PRESSED").unwrap()}
+            ctx.resources.rotary_switch.sample_count = 0;
+        //            ctx.spawn.change_mode(OperatingMode::Configuration);
+        } else if edge == Some(Edge::Falling) {
+            debug_only! {hprintln!("rotary RELEASED").unwrap()}
+            ctx.resources.rotary_switch.sample_count = 0;
+        //            ctx.spawn.change_mode(OperatingMode::Normal);
+        } else if ctx.resources.rotary_switch.sample_count <= DEBOUNCE_SAMPLE_CNT {
+            // Re-schedule the timer interrupt to get enough samples
+            ctx.schedule
+                .poll_rotary_switch(ctx.scheduled + POLL_SWITCH_PERIOD.cycles())
+                .unwrap();
+        } else {
+            debug_only! {hprintln!("rotary nothing ? {:?} {:?}", pressed, ctx.resources.rotary_switch.pin.is_high()).unwrap()}
+
+            debug_only! {
+                hprintln!("rotary switch is {:?} debouncer is {:?}",
+                          ctx.resources.rotary_switch.pin.is_high(),
+                          ctx.resources.rotary_switch.debouncer.is_high())
+                    .unwrap()
+            }
+
+            ctx.resources.rotary_switch.sample_count = 0;
         }
     }
 
@@ -715,16 +815,30 @@ const APP: () = {
         }
     }
 
-    #[task(binds = GPIOB, resources = [rotary, mode, conf_switch], spawn = [ knob_turned, poll_switch ])]
+    #[task(binds = GPIOB, resources = [rotary, mode, toggle_switch, rotary_switch], spawn = [ knob_turned, poll_toggle_switch, poll_rotary_switch ])]
     fn gpiob_rotary_switch(cx: gpiob_rotary_switch::Context) {
         // whatever happens, clear these ITs.
         cx.resources.rotary.pin_a().clear_interrupt();
         cx.resources.rotary.pin_b().clear_interrupt();
 
-        if cx.resources.conf_switch.get_interrupt_status() {
-            debug_only! {hprintln!("switch IT raised!").unwrap()}
-            cx.resources.conf_switch.clear_interrupt();
-            cx.spawn.poll_switch();
+        if cx.resources.toggle_switch.pin.get_interrupt_status() {
+            debug_only! {hprintln!("toggle switch IT raised, starting debouncing sampling!").unwrap()}
+            cx.resources.toggle_switch.pin.clear_interrupt();
+
+            debug_only! {
+                hprintln!("mode is {:?}, tog switch is {:?} debouncer is {:?}",
+                          cx.resources.mode,
+                          cx.resources.toggle_switch.pin.is_high(),
+                          cx.resources.toggle_switch.debouncer.is_high())
+                    .unwrap()
+            }
+
+            cx.spawn.poll_toggle_switch();
+        }
+
+        if cx.resources.rotary_switch.pin.get_interrupt_status() {
+            cx.resources.rotary_switch.pin.clear_interrupt();
+            cx.spawn.poll_rotary_switch();
         }
 
         match *cx.resources.mode {
@@ -742,7 +856,7 @@ const APP: () = {
         }
     }
 
-    #[task(binds = GPIOD, resources = [rtc, rtc_int_pin], spawn = [display_time, handle_event_alarm] )]
+    #[task(binds = GPIOD, resources = [rtc, mode, rtc_int_pin], spawn = [display_time, handle_event_alarm] )]
     fn gpiod(mut cx: gpiod::Context) {
         let mut a1 = false;
         let mut a2 = false;
@@ -765,7 +879,7 @@ const APP: () = {
         if a1 {
             cx.spawn.handle_event_alarm(time.unwrap()).unwrap();
         }
-        if a2 {
+        if a2 && *cx.resources.mode == OperatingMode::Normal {
             cx.spawn.display_time(time.unwrap()).unwrap();
         }
 

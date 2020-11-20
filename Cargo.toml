@@ -24,7 +24,8 @@ panic = "abort"
 [dependencies]
 ws2812-spi = "0.3"
 rotary-encoder-hal = {git = "https://github.com/dkm/rotary-encoder-hal" , features = ["table-decoder"] }
-debouncr = "0.2.0"
+##debouncr = "0.2.0"
+debouncr = { git = "https://github.com/dkm/debouncr/", branch = "pr/fix_stateful_init" }
 
 ##ws2812-spi = {git = "https://github.com/smart-leds-rs/ws2812-spi-rs"}
 ## tm4c123x-hal = {git = "https://github.com/thejpster/tm4c-hal.git", features = ["rt"]}

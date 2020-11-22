@@ -128,8 +128,8 @@ impl DelayUs<u8> for SimpleAsmDelay {
 //
 // PB0: EPD
 // PB1: Rotary Encoder (pinA)
-// PB2: I2C0
-// PB3: I2C0
+// PB2: I2C0 (SCL)
+// PB3: I2C0 (SDA)
 // PB4: Rotary Encoder (pinB)
 // PB5: Toggle Switch (config mode)
 // PB6:
@@ -223,9 +223,15 @@ pub enum FSMState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SubConfig {
+    Hour,
+    Minute,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OperatingMode {
     Normal,
-    Configuration,
+    Configuration (SubConfig),
 }
 
 pub struct Screen {
@@ -286,6 +292,7 @@ const APP: () = {
 
         toggle_switch: ToggleSwitchT,
         rotary_switch: RotarySwitchT,
+        new_time: (u32,u32),
 
         rotary: RotaryT,
 
@@ -294,7 +301,7 @@ const APP: () = {
         state: FSMState,
     }
 
-    #[init(spawn = [display_time, change_mode, set_leds])]
+    #[init(spawn = [refresh_time, change_mode, set_leds])]
     fn init(mut cx: init::Context) -> init::LateResources {
         // Initialize (enable) the monotonic timer (CYCCNT)
         cx.core.DCB.enable_trace();
@@ -415,7 +422,7 @@ const APP: () = {
         //        rtc.set_time(&time).unwrap();
 
         let time = rtc.get_time().unwrap();
-        cx.spawn.display_time(time);
+        cx.spawn.refresh_time(time, 0);
 
         let ranges = [
             TimeRange {
@@ -511,7 +518,7 @@ const APP: () = {
         let switch_state = toggle_switch.pin.is_high();
 
         let mode = if switch_state {
-            OperatingMode::Configuration
+            OperatingMode::Configuration(SubConfig::Hour)
         } else {
             OperatingMode::Normal
         };
@@ -544,6 +551,7 @@ const APP: () = {
             next_or_current_range,
             state,
             rotary,
+            new_time: (0,0),
 
             toggle_switch,
             rotary_switch,
@@ -551,7 +559,8 @@ const APP: () = {
     }
 
     #[task(
-        resources = [mode, rotary, screen],
+        resources = [mode, rotary, screen, new_time, rtc],
+        spawn = [refresh_epd]
     )]
     fn change_mode(mut ctx: change_mode::Context, mode: OperatingMode) {
         debug_only! {hprintln!("change mode from {:?} to {:?}", *ctx.resources.mode, mode).unwrap()}
@@ -568,6 +577,7 @@ const APP: () = {
                         .epd
                         .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLUT::FULL)
                         .unwrap();
+                    draw_text(&mut screen.display, "N ", 2, 0);
                 });
                 ctx.resources.rotary.pin_a().clear_interrupt();
                 ctx.resources
@@ -579,14 +589,24 @@ const APP: () = {
                     .rotary
                     .pin_b()
                     .set_interrupt_mode(InterruptMode::Disabled);
+                let new_time = NaiveTime::from_hms(ctx.resources.new_time.0, ctx.resources.new_time.1, 0);
+                ctx.resources.rtc.lock(|rtc|{rtc.set_time(&new_time).unwrap();});
             }
-            OperatingMode::Configuration => {
-                ctx.resources.screen.lock(|screen| {
-                    screen
-                        .epd
-                        .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLUT::QUICK)
-                        .unwrap();
+            OperatingMode::Configuration(_) => {
+                let mut new_time = ctx.resources.rtc.lock(|rtc| {
+                    let t = rtc.get_time().unwrap();
+                    (t.hour(), t.minute())
                 });
+
+                ctx.resources.screen.lock(|screen| {
+                //     screen
+                //         .epd
+                //         .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLUT::QUICK)
+                //         .unwrap();
+                    draw_text(&mut screen.display, "C ", 2, 0);
+                });
+                *ctx.resources.new_time = new_time;
+
                 ctx.resources.rotary.pin_a().clear_interrupt();
                 ctx.resources
                     .rotary
@@ -599,6 +619,7 @@ const APP: () = {
                     .set_interrupt_mode(InterruptMode::EdgeBoth);
             }
         }
+        ctx.spawn.refresh_epd();
     }
 
     #[task(
@@ -617,7 +638,7 @@ const APP: () = {
         // Dispatch event
         if edge == Some(Edge::Rising) {
             ctx.resources.toggle_switch.sample_count = 0;
-            ctx.spawn.change_mode(OperatingMode::Configuration);
+            ctx.spawn.change_mode(OperatingMode::Configuration(SubConfig::Hour));
         } else if edge == Some(Edge::Falling) {
             ctx.resources.toggle_switch.sample_count = 0;
             ctx.spawn.change_mode(OperatingMode::Normal);
@@ -658,6 +679,11 @@ const APP: () = {
         if edge == Some(Edge::Rising) {
             debug_only! {hprintln!("rotary PRESSED").unwrap()}
             ctx.resources.rotary_switch.sample_count = 0;
+            *ctx.resources.mode = match ctx.resources.mode {
+                OperatingMode::Normal => OperatingMode::Normal,
+                OperatingMode::Configuration(SubConfig::Hour) => OperatingMode::Configuration(SubConfig::Minute),
+                OperatingMode::Configuration(SubConfig::Minute) => OperatingMode::Configuration(SubConfig::Hour),
+            };
         //            ctx.spawn.change_mode(OperatingMode::Configuration);
         } else if edge == Some(Edge::Falling) {
             debug_only! {hprintln!("rotary RELEASED").unwrap()}
@@ -788,31 +814,52 @@ const APP: () = {
         // cx.resources.epd.sleep(&mut cx.resources.spi).unwrap();
     }
 
-    #[task(priority = 1, resources = [leds, rtc, screen])]
-    fn display_time(mut cx: display_time::Context, time: NaiveTime) {
+    #[task(priority = 1, resources = [screen])]
+    fn refresh_epd(mut cx: refresh_epd::Context) {
         cx.resources.screen.lock(|screen| {
-            draw_hour(&mut screen.display, &time);
             screen
                 .epd
                 .update_and_display_frame(&mut screen.spi, &screen.display.buffer())
                 .unwrap();
             screen.epd.sleep(&mut screen.spi).unwrap();
         });
+    }
 
+
+    #[task(priority = 1, resources = [screen], spawn = [refresh_epd])]
+    fn refresh_time(mut cx: refresh_time::Context, time: NaiveTime, line: u8) {
+        cx.resources.screen.lock(|screen| {
+            draw_hour(&mut screen.display, &time, line, 0);
+        });
+        cx.spawn.refresh_epd();
         debug_only! {hprintln!("refresh time with: {} {}", time.hour(), time.minute()).unwrap()}
     }
 
-    #[task(priority = 1, spawn = [display_time, rotate_leds], resources =[rtc])]
+    #[task(priority = 1, spawn = [refresh_time, rotate_leds], resources =[rtc, new_time, mode])]
     fn knob_turned(cx: knob_turned::Context, dir: Direction) {
+        let next_time = cx.resources.new_time;
+
         match dir {
             Direction::Clockwise => {
                 cx.spawn.rotate_leds(true, 1);
+                if *cx.resources.mode == OperatingMode::Configuration(SubConfig::Hour) {
+                    next_time.0 += 1;
+                } else {
+                    next_time.1 += 1;
+                }
             }
             Direction::CounterClockwise => {
                 cx.spawn.rotate_leds(false, 1);
+                if *cx.resources.mode == OperatingMode::Configuration(SubConfig::Hour) {
+                    next_time.0 -= 1;
+                } else {
+                    next_time.1 -= 1;
+                }
             }
             _ => (),
         }
+
+        cx.spawn.refresh_time(NaiveTime::from_hms(next_time.0, next_time.1, 0), 0);
     }
 
     #[task(binds = GPIOB, resources = [rotary, mode, toggle_switch, rotary_switch], spawn = [ knob_turned, poll_toggle_switch, poll_rotary_switch ])]
@@ -825,13 +872,13 @@ const APP: () = {
             debug_only! {hprintln!("toggle switch IT raised, starting debouncing sampling!").unwrap()}
             cx.resources.toggle_switch.pin.clear_interrupt();
 
-            debug_only! {
-                hprintln!("mode is {:?}, tog switch is {:?} debouncer is {:?}",
-                          cx.resources.mode,
-                          cx.resources.toggle_switch.pin.is_high(),
-                          cx.resources.toggle_switch.debouncer.is_high())
-                    .unwrap()
-            }
+            // debug_only! {
+            //     hprintln!("mode is {:?}, tog switch is {:?} debouncer is {:?}",
+            //               cx.resources.mode,
+            //               cx.resources.toggle_switch.pin.is_high(),
+            //               cx.resources.toggle_switch.debouncer.is_high())
+            //         .unwrap()
+            // }
 
             cx.spawn.poll_toggle_switch();
         }
@@ -844,7 +891,7 @@ const APP: () = {
         match *cx.resources.mode {
             OperatingMode::Normal => (),
 
-            OperatingMode::Configuration => {
+            OperatingMode::Configuration(_) => {
                 let dir = cx.resources.rotary.update().unwrap();
                 match dir {
                     Direction::Clockwise | Direction::CounterClockwise => {
@@ -856,16 +903,12 @@ const APP: () = {
         }
     }
 
-    #[task(binds = GPIOD, resources = [rtc, mode, rtc_int_pin], spawn = [display_time, handle_event_alarm] )]
+    #[task(binds = GPIOD, resources = [rtc, mode, rtc_int_pin], spawn = [refresh_time, handle_event_alarm] )]
     fn gpiod(mut cx: gpiod::Context) {
         let mut a1 = false;
         let mut a2 = false;
 
-        let mut time: Option<NaiveTime> = None;
-
-        cx.resources.rtc.lock(|rtc| {
-            time = Some(rtc.get_time().unwrap());
-
+        let time =  cx.resources.rtc.lock(|rtc| {
             if rtc.has_alarm1_matched().unwrap() {
                 rtc.clear_alarm1_matched_flag().unwrap();
                 a1 = true;
@@ -874,13 +917,14 @@ const APP: () = {
                 rtc.clear_alarm2_matched_flag().unwrap();
                 a2 = true;
             }
+            rtc.get_time().unwrap()
         });
 
         if a1 {
-            cx.spawn.handle_event_alarm(time.unwrap()).unwrap();
+            cx.spawn.handle_event_alarm(time).unwrap();
         }
         if a2 && *cx.resources.mode == OperatingMode::Normal {
-            cx.spawn.display_time(time.unwrap()).unwrap();
+            cx.spawn.refresh_time(time, 0).unwrap();
         }
 
         cx.resources.rtc_int_pin.clear_interrupt();
@@ -936,8 +980,9 @@ fn draw_text(display: &mut Display2in13, text: &str, line: u8, x: u8) {
         .draw(display);
 }
 
-fn draw_hour(display: &mut Display2in13, time: &NaiveTime) {
-    draw_text(display, NUM_CONV[time.hour() as usize], 0, 0);
-    draw_text(display, ":", 0, 2);
-    draw_text(display, NUM_CONV[time.minute() as usize], 0, 3);
+fn draw_hour(display: &mut Display2in13, time: &NaiveTime, line: u8, x: u8) {
+    clear_line(display, line);
+    draw_text(display, NUM_CONV[time.hour() as usize], line, x);
+    draw_text(display, ":", line, x + 2);
+    draw_text(display, NUM_CONV[time.minute() as usize], line, x + 3);
 }

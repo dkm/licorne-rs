@@ -19,6 +19,8 @@ extern crate ws2812_spi;
 
 use rtic::cyccnt::{Instant, U32Ext as _};
 
+use bme680::{Bme680, I2CAddress};
+
 use embedded_hal::{
     blocking::delay::{DelayMs, DelayUs},
     digital::v1::InputPin,
@@ -86,7 +88,7 @@ const NUM_CONV: [&str; 60] = [
     "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59",
 ];
 
-struct SimpleAsmDelay {
+pub struct SimpleAsmDelay {
     freq: u32,
 }
 
@@ -125,6 +127,8 @@ impl DelayUs<u8> for SimpleAsmDelay {
 // PA2: SSI0
 // PA4: SSI0
 // PA5: SSI0
+// PA6: I2C1 (scl)
+// PA7: I2C1 (sca)
 //
 // PB0: EPD
 // PB1: Rotary Encoder (pinA)
@@ -147,7 +151,7 @@ impl DelayUs<u8> for SimpleAsmDelay {
 use tm4c123x_hal::prelude::*;
 
 use tm4c123x_hal::{
-    gpio::gpioa::{PA2, PA4, PA5},
+    gpio::gpioa::{PA2, PA4, PA5, PA6, PA7},
     gpio::gpiob::{PB0, PB1, PB2, PB3, PB4, PB5, PB7},
     gpio::gpioc::PC6,
     gpio::gpiod::{PD0, PD1, PD2, PD3, PD6},
@@ -160,14 +164,14 @@ use tm4c123x_hal::{
     spi::{Spi, MODE_0},
     sysctl::{self, SysctlExt},
     time::U32Ext,
-    tm4c123x::{I2C0, SSI0, SSI1},
+    tm4c123x::{I2C0, I2C1, SSI0, SSI1},
 };
 
 use rotary_encoder_hal::{Direction, Rotary};
 // Specialized types for our particular setup.
 
 // i2c for DS3231 RTC
-type I2cT = I2c<
+type I2c0T = I2c<
     I2C0,
     (
         PB2<AlternateFunction<AF3, PushPull>>,
@@ -175,7 +179,17 @@ type I2cT = I2c<
     ),
 >;
 
-type RtcT = Ds323x<ds323x::interface::I2cInterface<I2cT>, ds323x::ic::DS3231>;
+type RtcT = Ds323x<ds323x::interface::I2cInterface<I2c0T>, ds323x::ic::DS3231>;
+
+// i2c for BME680 RTC
+type I2c1T = I2c<
+        I2C1,
+    (
+        PA6<AlternateFunction<AF3, PushPull>>,
+        PA7<AlternateFunction<AF3, OpenDrain<Floating>>>,
+    ),
+    >;
+type Bme680T = Bme680<I2c1T, SimpleAsmDelay>;
 
 // spi for WS2812
 type Spi0T = Spi<
@@ -231,7 +245,7 @@ pub enum SubConfig {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OperatingMode {
     Normal,
-    Configuration (SubConfig),
+    Configuration(SubConfig),
 }
 
 pub struct Screen {
@@ -290,9 +304,12 @@ const APP: () = {
         leds: ws2812::Ws2812<Spi1T>,
         leds_data: [RGB8; NUM_LEDS],
 
+        // temp & cov
+        bme680 : Bme680T,
+
         toggle_switch: ToggleSwitchT,
         rotary_switch: RotarySwitchT,
-        new_time: (u32,u32),
+        new_time: (u32, u32),
 
         rotary: RotaryT,
 
@@ -327,7 +344,7 @@ const APP: () = {
         let mut portd = p.GPIO_PORTD.split(&sc.power_control);
         let porte = p.GPIO_PORTE.split(&sc.power_control);
 
-        let i2c_dev = I2c::i2c0(
+        let i2c_rtc_dev = I2c::i2c0(
             p.I2C0,
             (
                 portb.pb2.into_af_push_pull::<AF3>(&mut portb.control), // SCL
@@ -339,7 +356,7 @@ const APP: () = {
             &clocks,
             &sc.power_control,
         );
-        let mut rtc = Ds323x::new_ds3231(i2c_dev);
+        let mut rtc = Ds323x::new_ds3231(i2c_rtc_dev);
 
         let mut spi0 = Spi::spi0(
             p.SSI0,
@@ -362,8 +379,26 @@ const APP: () = {
         // : cortex_m::Peripherals
         let cp = cx.core;
 
-        let mut delay = SimpleAsmDelay { freq: 80_000_000 };
+        let i2c_bme680 = I2c::i2c1(
+            p.I2C1,
+            (
+                porta.pa6.into_af_push_pull::<AF3>(&mut porta.control), // SCL
+                porta
+                    .pa7
+                    .into_af_open_drain::<AF3, Floating>(&mut porta.control),
+            ), // SDA
+            100.khz(),
+            &clocks,
+            &sc.power_control,
+        );
+        let mut bme680 = Bme680::init(
+            i2c_bme680,
+            SimpleAsmDelay { freq: 80_000_000 },
+            I2CAddress::Primary,
+        )
+        .unwrap();
 
+        let mut delay = SimpleAsmDelay { freq: 80_000_000 };
         let mut epd =
             EPD2in13::new(&mut spi0, cs_pin, busy_pin, dc_pin, rst_pin, &mut delay).unwrap();
 

@@ -495,8 +495,8 @@ const APP: () = {
                     ).unwrap()
                 }
 
-                draw_text(&mut display, "Wait: ", 1, 0);
-                draw_text(&mut display, range.name, 1, 6);
+//                draw_text(&mut display, "Wait: ", 1, 0);
+//                draw_text(&mut display, range.name, 1, 6);
 
                 rtc.set_alarm1_hms(range.start).unwrap();
                 found = true;
@@ -509,9 +509,8 @@ const APP: () = {
 
                 cx.spawn.set_leds(0, 1, range.in_color);
 
-                draw_text(&mut display, "In: ", 1, 0);
-
-                draw_text(&mut display, range.name, 1, 4);
+                // draw_text(&mut display, "In: ", 1, 0);
+                // draw_text(&mut display, range.name, 1, 4);
 
                 rtc.set_alarm1_hms(range.end).unwrap();
                 found = true;
@@ -582,11 +581,13 @@ const APP: () = {
             leds,
             leds_data: [colors::BLACK; NUM_LEDS],
 
+            bme680,
+
             ranges,
             next_or_current_range,
             state,
             rotary,
-            new_time: (0,0),
+            new_time: (0, 0),
 
             toggle_switch,
             rotary_switch,
@@ -624,8 +625,11 @@ const APP: () = {
                     .rotary
                     .pin_b()
                     .set_interrupt_mode(InterruptMode::Disabled);
-                let new_time = NaiveTime::from_hms(ctx.resources.new_time.0, ctx.resources.new_time.1, 0);
-                ctx.resources.rtc.lock(|rtc|{rtc.set_time(&new_time).unwrap();});
+                let new_time =
+                    NaiveTime::from_hms(ctx.resources.new_time.0, ctx.resources.new_time.1, 0);
+                ctx.resources.rtc.lock(|rtc| {
+                    rtc.set_time(&new_time).unwrap();
+                });
             }
             OperatingMode::Configuration(_) => {
                 let mut new_time = ctx.resources.rtc.lock(|rtc| {
@@ -634,10 +638,10 @@ const APP: () = {
                 });
 
                 ctx.resources.screen.lock(|screen| {
-                //     screen
-                //         .epd
-                //         .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLUT::QUICK)
-                //         .unwrap();
+                    //     screen
+                    //         .epd
+                    //         .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLUT::QUICK)
+                    //         .unwrap();
                     draw_text(&mut screen.display, "C ", 2, 0);
                 });
                 *ctx.resources.new_time = new_time;
@@ -673,7 +677,8 @@ const APP: () = {
         // Dispatch event
         if edge == Some(Edge::Rising) {
             ctx.resources.toggle_switch.sample_count = 0;
-            ctx.spawn.change_mode(OperatingMode::Configuration(SubConfig::Hour));
+            ctx.spawn
+                .change_mode(OperatingMode::Configuration(SubConfig::Hour));
         } else if edge == Some(Edge::Falling) {
             ctx.resources.toggle_switch.sample_count = 0;
             ctx.spawn.change_mode(OperatingMode::Normal);
@@ -716,8 +721,12 @@ const APP: () = {
             ctx.resources.rotary_switch.sample_count = 0;
             *ctx.resources.mode = match ctx.resources.mode {
                 OperatingMode::Normal => OperatingMode::Normal,
-                OperatingMode::Configuration(SubConfig::Hour) => OperatingMode::Configuration(SubConfig::Minute),
-                OperatingMode::Configuration(SubConfig::Minute) => OperatingMode::Configuration(SubConfig::Hour),
+                OperatingMode::Configuration(SubConfig::Hour) => {
+                    OperatingMode::Configuration(SubConfig::Minute)
+                }
+                OperatingMode::Configuration(SubConfig::Minute) => {
+                    OperatingMode::Configuration(SubConfig::Hour)
+                }
             };
         //            ctx.spawn.change_mode(OperatingMode::Configuration);
         } else if edge == Some(Edge::Falling) {
@@ -782,14 +791,13 @@ const APP: () = {
                 debug_only! {hprintln!("Enter").unwrap()}
                 clear_line(&mut cx.resources.screen.display, 1);
 
-                draw_text(&mut cx.resources.screen.display, "In: ", 1, 0);
-
-                draw_text(
-                    &mut cx.resources.screen.display,
-                    cx.resources.ranges[*range].name,
-                    1,
-                    4,
-                );
+                // draw_text(&mut cx.resources.screen.display, "In: ", 1, 0);
+                // draw_text(
+                //     &mut cx.resources.screen.display,
+                //     cx.resources.ranges[*range].name,
+                //     1,
+                //     4,
+                // );
                 cx.spawn
                     .set_leds(0, 1, cx.resources.ranges[*range].in_color);
 
@@ -807,15 +815,15 @@ const APP: () = {
 
                 cx.spawn.set_leds(0, 1, colors::GREEN);
 
-                draw_text(&mut cx.resources.screen.display, "Wait: ", 1, 0);
+                // draw_text(&mut cx.resources.screen.display, "Wait: ", 1, 0);
 
                 if *range == cx.resources.ranges.len() - 1 {
-                    draw_text(
-                        &mut cx.resources.screen.display,
-                        cx.resources.ranges[0].name,
-                        1,
-                        6,
-                    );
+                    // draw_text(
+                    //     &mut cx.resources.screen.display,
+                    //     cx.resources.ranges[0].name,
+                    //     1,
+                    //     6,
+                    // );
 
                     cx.resources
                         .rtc
@@ -823,12 +831,12 @@ const APP: () = {
                         .unwrap();
                     Some(FSMState::WaitNextRange(0))
                 } else {
-                    draw_text(
-                        &mut cx.resources.screen.display,
-                        cx.resources.ranges[*range + 1].name,
-                        1,
-                        6,
-                    );
+                    // draw_text(
+                    //     &mut cx.resources.screen.display,
+                    //     cx.resources.ranges[*range + 1].name,
+                    //     1,
+                    //     6,
+                    // );
 
                     cx.resources
                         .rtc
@@ -859,7 +867,6 @@ const APP: () = {
             screen.epd.sleep(&mut screen.spi).unwrap();
         });
     }
-
 
     #[task(priority = 1, resources = [screen], spawn = [refresh_epd])]
     fn refresh_time(mut cx: refresh_time::Context, time: NaiveTime, line: u8) {
@@ -894,7 +901,8 @@ const APP: () = {
             _ => (),
         }
 
-        cx.spawn.refresh_time(NaiveTime::from_hms(next_time.0, next_time.1, 0), 0);
+        cx.spawn
+            .refresh_time(NaiveTime::from_hms(next_time.0, next_time.1, 0), 0);
     }
 
     #[task(binds = GPIOB, resources = [rotary, mode, toggle_switch, rotary_switch], spawn = [ knob_turned, poll_toggle_switch, poll_rotary_switch ])]
@@ -943,7 +951,7 @@ const APP: () = {
         let mut a1 = false;
         let mut a2 = false;
 
-        let time =  cx.resources.rtc.lock(|rtc| {
+        let time = cx.resources.rtc.lock(|rtc| {
             if rtc.has_alarm1_matched().unwrap() {
                 rtc.clear_alarm1_matched_flag().unwrap();
                 a1 = true;

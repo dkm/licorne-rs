@@ -17,9 +17,15 @@ extern crate tm4c123x_hal;
 extern crate tm4c_hal;
 extern crate ws2812_spi;
 
+use heapless::{consts::U20, String};
+
+use ufmt::uwrite;
+
 use rtic::cyccnt::{Instant, U32Ext as _};
 
-use bme680::{Bme680, I2CAddress};
+use bme680::{Bme680, I2CAddress, IIRFilterSize, OversamplingSetting, PowerMode, SettingsBuilder};
+
+use core::time::Duration;
 
 use embedded_hal::{
     blocking::delay::{DelayMs, DelayUs},
@@ -183,12 +189,12 @@ type RtcT = Ds323x<ds323x::interface::I2cInterface<I2c0T>, ds323x::ic::DS3231>;
 
 // i2c for BME680 RTC
 type I2c1T = I2c<
-        I2C1,
+    I2C1,
     (
         PA6<AlternateFunction<AF3, PushPull>>,
         PA7<AlternateFunction<AF3, OpenDrain<Floating>>>,
     ),
-    >;
+>;
 type Bme680T = Bme680<I2c1T, SimpleAsmDelay>;
 
 // spi for WS2812
@@ -305,7 +311,7 @@ const APP: () = {
         leds_data: [RGB8; NUM_LEDS],
 
         // temp & cov
-        bme680 : Bme680T,
+        bme680: Bme680T,
 
         toggle_switch: ToggleSwitchT,
         rotary_switch: RotarySwitchT,
@@ -318,7 +324,7 @@ const APP: () = {
         state: FSMState,
     }
 
-    #[init(spawn = [refresh_time, change_mode, set_leds])]
+    #[init(spawn = [refresh_bme680, refresh_time, change_mode, set_leds])]
     fn init(mut cx: init::Context) -> init::LateResources {
         // Initialize (enable) the monotonic timer (CYCCNT)
         cx.core.DCB.enable_trace();
@@ -398,6 +404,16 @@ const APP: () = {
         )
         .unwrap();
 
+        let settings = SettingsBuilder::new()
+            .with_humidity_oversampling(OversamplingSetting::OS2x)
+            .with_pressure_oversampling(OversamplingSetting::OS4x)
+            .with_temperature_oversampling(OversamplingSetting::OS8x)
+            .with_temperature_filter(IIRFilterSize::Size3)
+            .with_gas_measurement(Duration::from_millis(1500), 320, 25)
+            .with_run_gas(true)
+            .build();
+        bme680.set_sensor_settings(settings).unwrap();
+
         let mut delay = SimpleAsmDelay { freq: 80_000_000 };
         let mut epd =
             EPD2in13::new(&mut spi0, cs_pin, busy_pin, dc_pin, rst_pin, &mut delay).unwrap();
@@ -458,6 +474,7 @@ const APP: () = {
 
         let time = rtc.get_time().unwrap();
         cx.spawn.refresh_time(time, 0);
+        cx.spawn.refresh_bme680(1);
 
         let ranges = [
             TimeRange {
@@ -495,8 +512,8 @@ const APP: () = {
                     ).unwrap()
                 }
 
-//                draw_text(&mut display, "Wait: ", 1, 0);
-//                draw_text(&mut display, range.name, 1, 6);
+                //                draw_text(&mut display, "Wait: ", 1, 0);
+                //                draw_text(&mut display, range.name, 1, 6);
 
                 rtc.set_alarm1_hms(range.start).unwrap();
                 found = true;
@@ -868,6 +885,52 @@ const APP: () = {
         });
     }
 
+    #[task(priority = 1, resources = [screen, bme680], spawn = [refresh_epd])]
+    fn refresh_bme680(mut cx: refresh_bme680::Context, line: u8) {
+        cx.resources
+            .bme680
+            .set_sensor_mode(PowerMode::ForcedMode)
+            .unwrap();
+        let (data, _state) = cx.resources.bme680.get_sensor_data().unwrap();
+
+        let mut s_tp: String<U20> = String::new();
+
+        let (temp, pres, humid, gas): (i32, i32, i32, i32) = (
+            data.temperature_celsius() as i32,
+            data.pressure_hpa() as i32,
+            data.humidity_percent() as i32,
+            data.gas_resistance_ohm() as i32,
+        );
+
+        uwrite!(s_tp, "{}°C,{}hPa",
+                temp,pres
+                // data.temperature_celsius() as u32,
+                // data.pressure_hpa() as u32,
+        )
+        .unwrap();
+
+        let mut s_hro: String<U20> = String::new();
+        uwrite!(s_hro, "{}%,{}Ω",
+                humid, gas
+                // data.humidity_percent() as u32,
+                // data.gas_resistance_ohm() as u32,
+        )
+        .unwrap();
+
+        cx.resources.screen.lock(|screen| {
+            draw_text(&mut screen.display, &s_tp, line, 0);
+            draw_text(&mut screen.display, &s_hro, line + 1, 0);
+        });
+
+        debug_only! {
+            hprintln!("Temperature {}°C\nPressure {}hPa\nHumidity {}%Gas Resistence {}Ω",
+                      data.temperature_celsius(),
+                      data.pressure_hpa(),
+                      data.humidity_percent(),
+                      data.gas_resistance_ohm()).unwrap()
+        }
+    }
+
     #[task(priority = 1, resources = [screen], spawn = [refresh_epd])]
     fn refresh_time(mut cx: refresh_time::Context, time: NaiveTime, line: u8) {
         cx.resources.screen.lock(|screen| {
@@ -946,7 +1009,7 @@ const APP: () = {
         }
     }
 
-    #[task(binds = GPIOD, resources = [rtc, mode, rtc_int_pin], spawn = [refresh_time, handle_event_alarm] )]
+    #[task(binds = GPIOD, resources = [rtc, mode, rtc_int_pin], spawn = [refresh_time, refresh_bme680, handle_event_alarm] )]
     fn gpiod(mut cx: gpiod::Context) {
         let mut a1 = false;
         let mut a2 = false;
@@ -967,6 +1030,7 @@ const APP: () = {
             cx.spawn.handle_event_alarm(time).unwrap();
         }
         if a2 && *cx.resources.mode == OperatingMode::Normal {
+            cx.spawn.refresh_bme680(1).unwrap();
             cx.spawn.refresh_time(time, 0).unwrap();
         }
 

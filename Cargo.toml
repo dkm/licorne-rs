@@ -27,7 +27,7 @@ rotary-encoder-hal = {git = "https://github.com/dkm/rotary-encoder-hal" , featur
 ##debouncr = "0.2.0"
 debouncr = { git = "https://github.com/dkm/debouncr/", branch = "pr/fix_stateful_init" }
 bme680 = "0.5"
-
+ufmt = "0.1.0"
 ##ws2812-spi = {git = "https://github.com/smart-leds-rs/ws2812-spi-rs"}
 ## tm4c123x-hal = {git = "https://github.com/thejpster/tm4c-hal.git", features = ["rt"]}
 ##tm4c123x-hal = "0.10"
@@ -49,6 +49,10 @@ smart-leds = "0.3"
 epd-waveshare = {path = "../epd-waveshare" }
 embedded-graphics = "0.6"
 cortex-m-rtic = "0.5"
+
+[dependencies.heapless]
+version = "0.5"
+features = ["ufmt-impl"]
 
 [dependencies.cast]
 version = "0.2"

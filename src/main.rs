@@ -17,11 +17,14 @@ extern crate tm4c123x_hal;
 extern crate tm4c_hal;
 extern crate ws2812_spi;
 
-use heapless::{consts::U20, String};
+use heapless::{
+    consts::{U20, U4, U5},
+    String,
+};
 
 use ufmt::uwrite;
 
-use rtic::cyccnt::{Instant, U32Ext as _};
+use rtic::cyccnt::U32Ext as _;
 
 use bme680::{Bme680, I2CAddress, IIRFilterSize, OversamplingSetting, PowerMode, SettingsBuilder};
 
@@ -32,13 +35,12 @@ use embedded_hal::{
     digital::v1::InputPin,
 };
 
-use cortex_m_semihosting::{debug, hprintln};
-use panic_semihosting as _;
+use cortex_m_semihosting::hprintln;
 
 use debouncr::{debounce_stateful_12, DebouncerStateful, Edge, Repeat12};
 
 use embedded_graphics::{
-    fonts::{Font24x32, Text},
+    fonts::{Font12x16, Font24x32, Font6x12, Text},
     pixelcolor::BinaryColor::Off as White,
     pixelcolor::BinaryColor::On as Black,
     prelude::*,
@@ -47,22 +49,14 @@ use embedded_graphics::{
     text_style,
 };
 
-use cortex_m::{
-    interrupt::{free, Mutex},
-    peripheral::DWT,
-};
+use cortex_m::peripheral::DWT;
 use epd_waveshare::{
     epd2in13_v2::{Display2in13, EPD2in13},
     graphics::{Display, DisplayRotation},
     prelude::*,
 };
 
-use cortex_m_rt::{entry, exception};
-use cortex_m_semihosting::hio;
-
 use ds323x::{Alarm2Matching, DayAlarm2, Ds323x, Hours, NaiveTime, Rtcc, Timelike};
-
-use core::{cell::RefCell, fmt::Write, ops::DerefMut};
 
 use smart_leds::{colors, SmartLedsWrite, RGB8};
 
@@ -86,13 +80,21 @@ macro_rules! debug_only {
 
 const NUM_LEDS: usize = 8;
 
-// cheap/dumb way to convert time fields to strings.
-const NUM_CONV: [&str; 60] = [
-    "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31",
-    "32", "33", "34", "35", "36", "37", "38", "39", "40", "41", "42", "43", "44", "45", "46", "47",
-    "48", "49", "50", "51", "52", "53", "54", "55", "56", "57", "58", "59",
-];
+const FONT_TIME: embedded_graphics::fonts::Font24x32 = Font24x32;
+const FONT_RIGHT_BAR: embedded_graphics::fonts::Font12x16 = Font12x16;
+
+const SCR_HOUR_X_OFF: i32 = 5;
+const SCR_HOUR_Y_OFF: i32 = 5;
+
+const SCR_RIGHT_BAR_TEMP_X_OFF: i32 = 200;
+const SCR_RIGHT_BAR_TEMP_Y_OFF: i32 = 5;
+
+const SCR_RIGHT_BAR_HUMID_X_OFF: i32 = 200;
+const SCR_RIGHT_BAR_HUMID_Y_OFF: i32 = 18 + SCR_RIGHT_BAR_TEMP_Y_OFF;
+
+const FONT_CONFIG: embedded_graphics::fonts::Font12x16 = Font12x16;
+const SCR_CONFIG_X_OFF : i32 = 200;
+const SCR_CONFIG_Y_OFF : i32 = 100;
 
 pub struct SimpleAsmDelay {
     freq: u32,
@@ -154,7 +156,6 @@ impl DelayUs<u8> for SimpleAsmDelay {
 // PD6: RTC / INT
 //
 // PE4: EPD
-use tm4c123x_hal::prelude::*;
 
 use tm4c123x_hal::{
     gpio::gpioa::{PA2, PA4, PA5, PA6, PA7},
@@ -293,7 +294,7 @@ type RotarySwitchT = Switch<RotarySwitchPinT>;
 const POLL_SWITCH_PERIOD: u32 = 80_000;
 const DEBOUNCE_SAMPLE_CNT: u8 = 12;
 
-#[rtic::app(device = tm4c123x, peripherals = true, monotonic = rtic::cyccnt::CYCCNT)]
+#[rtic::app(device = tm4c123x_hal::pac, peripherals = true, monotonic = rtic::cyccnt::CYCCNT)]
 const APP: () = {
     struct Resources {
         mode: OperatingMode,
@@ -473,8 +474,8 @@ const APP: () = {
         //        rtc.set_time(&time).unwrap();
 
         let time = rtc.get_time().unwrap();
-        cx.spawn.refresh_time(time, 0);
-        cx.spawn.refresh_bme680(1);
+        cx.spawn.refresh_time(time);
+        cx.spawn.refresh_bme680();
 
         let ranges = [
             TimeRange {
@@ -630,7 +631,7 @@ const APP: () = {
                         .epd
                         .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLUT::FULL)
                         .unwrap();
-                    draw_text(&mut screen.display, "N ", 2, 0);
+                    draw_config_hint(&mut screen.display, false);
                 });
                 ctx.resources.rotary.pin_a().clear_interrupt();
                 ctx.resources
@@ -655,11 +656,7 @@ const APP: () = {
                 });
 
                 ctx.resources.screen.lock(|screen| {
-                    //     screen
-                    //         .epd
-                    //         .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLUT::QUICK)
-                    //         .unwrap();
-                    draw_text(&mut screen.display, "C ", 2, 0);
+                    draw_config_hint(&mut screen.display, true);
                 });
                 *ctx.resources.new_time = new_time;
 
@@ -806,15 +803,6 @@ const APP: () = {
             FSMState::Idle => None,
             FSMState::WaitNextRange(ref range) => {
                 debug_only! {hprintln!("Enter").unwrap()}
-                clear_line(&mut cx.resources.screen.display, 1);
-
-                // draw_text(&mut cx.resources.screen.display, "In: ", 1, 0);
-                // draw_text(
-                //     &mut cx.resources.screen.display,
-                //     cx.resources.ranges[*range].name,
-                //     1,
-                //     4,
-                // );
                 cx.spawn
                     .set_leds(0, 1, cx.resources.ranges[*range].in_color);
 
@@ -831,30 +819,13 @@ const APP: () = {
                 debug_only! {hprintln!("Exit").unwrap()}
 
                 cx.spawn.set_leds(0, 1, colors::GREEN);
-
-                // draw_text(&mut cx.resources.screen.display, "Wait: ", 1, 0);
-
                 if *range == cx.resources.ranges.len() - 1 {
-                    // draw_text(
-                    //     &mut cx.resources.screen.display,
-                    //     cx.resources.ranges[0].name,
-                    //     1,
-                    //     6,
-                    // );
-
                     cx.resources
                         .rtc
                         .set_alarm1_hms(cx.resources.ranges[0].start)
                         .unwrap();
                     Some(FSMState::WaitNextRange(0))
                 } else {
-                    // draw_text(
-                    //     &mut cx.resources.screen.display,
-                    //     cx.resources.ranges[*range + 1].name,
-                    //     1,
-                    //     6,
-                    // );
-
                     cx.resources
                         .rtc
                         .set_alarm1_hms(cx.resources.ranges[*range + 1].start)
@@ -865,13 +836,6 @@ const APP: () = {
         } {
             *cx.resources.state = new_state;
         }
-
-        // refresh display and make it go ZZZzzzZZzzz
-        // cx.resources
-        //     .epd
-        //     .update_and_display_frame(&mut cx.resources.spi, &cx.resources.display.buffer())
-        //     .unwrap();
-        // cx.resources.epd.sleep(&mut cx.resources.spi).unwrap();
     }
 
     #[task(priority = 1, resources = [screen])]
@@ -886,14 +850,12 @@ const APP: () = {
     }
 
     #[task(priority = 1, resources = [screen, bme680], spawn = [refresh_epd])]
-    fn refresh_bme680(mut cx: refresh_bme680::Context, line: u8) {
+    fn refresh_bme680(mut cx: refresh_bme680::Context) {
         cx.resources
             .bme680
             .set_sensor_mode(PowerMode::ForcedMode)
             .unwrap();
         let (data, _state) = cx.resources.bme680.get_sensor_data().unwrap();
-
-        let mut s_tp: String<U20> = String::new();
 
         let (temp, pres, humid, gas): (i32, i32, i32, i32) = (
             data.temperature_celsius() as i32,
@@ -902,40 +864,64 @@ const APP: () = {
             data.gas_resistance_ohm() as i32,
         );
 
-        uwrite!(s_tp, "{}°C,{}hPa",
-                temp,pres
-                // data.temperature_celsius() as u32,
-                // data.pressure_hpa() as u32,
-        )
-        .unwrap();
+        let mut temp_s: String<U5> = String::new();
+        uwrite!(temp_s, "{}{}°C", if temp < 10 { " " } else { "" }, temp).unwrap();
 
-        let mut s_hro: String<U20> = String::new();
-        uwrite!(s_hro, "{}%,{}Ω",
-                humid, gas
-                // data.humidity_percent() as u32,
-                // data.gas_resistance_ohm() as u32,
-        )
-        .unwrap();
+        let mut humid_s: String<U5> = String::new();
+        uwrite!(
+            humid_s,
+            "{}{}%",
+            if humid < 10 {
+                "  "
+            } else if humid < 100 {
+                " "
+            } else {
+                ""
+            },
+            humid
+        );
 
         cx.resources.screen.lock(|screen| {
-            draw_text(&mut screen.display, &s_tp, line, 0);
-            draw_text(&mut screen.display, &s_hro, line + 1, 0);
-        });
+            let _ = Text::new(
+                &temp_s,
+                Point::new(SCR_RIGHT_BAR_TEMP_X_OFF, SCR_RIGHT_BAR_TEMP_Y_OFF),
+            )
+            .into_styled(text_style!(
+                font = FONT_RIGHT_BAR,
+                text_color = Black,
+                background_color = White
+            ))
+            .draw(&mut screen.display);
 
-        debug_only! {
-            hprintln!("Temperature {}°C\nPressure {}hPa\nHumidity {}%Gas Resistence {}Ω",
-                      data.temperature_celsius(),
-                      data.pressure_hpa(),
-                      data.humidity_percent(),
-                      data.gas_resistance_ohm()).unwrap()
-        }
+            let _ = Text::new(
+                &humid_s,
+                Point::new(SCR_RIGHT_BAR_HUMID_X_OFF, SCR_RIGHT_BAR_HUMID_Y_OFF),
+            )
+            .into_styled(text_style!(
+                font = FONT_RIGHT_BAR,
+                text_color = Black,
+                background_color = White
+            ))
+            .draw(&mut screen.display);
+        });
     }
 
     #[task(priority = 1, resources = [screen], spawn = [refresh_epd])]
-    fn refresh_time(mut cx: refresh_time::Context, time: NaiveTime, line: u8) {
+    fn refresh_time(mut cx: refresh_time::Context, time: NaiveTime) {
         cx.resources.screen.lock(|screen| {
-            draw_hour(&mut screen.display, &time, line, 0);
+            // Only "HH:MM"
+            let mut hhmm: String<U5> = String::new();
+            uwrite!(hhmm, "{}:{}", time.hour(), time.minute());
+
+            let _ = Text::new(&hhmm, Point::new(SCR_HOUR_X_OFF as i32, SCR_HOUR_Y_OFF))
+                .into_styled(text_style!(
+                    font = FONT,
+                    text_color = Black,
+                    background_color = White
+                ))
+                .draw(&mut screen.display);
         });
+
         cx.spawn.refresh_epd();
         debug_only! {hprintln!("refresh time with: {} {}", time.hour(), time.minute()).unwrap()}
     }
@@ -965,7 +951,7 @@ const APP: () = {
         }
 
         cx.spawn
-            .refresh_time(NaiveTime::from_hms(next_time.0, next_time.1, 0), 0);
+            .refresh_time(NaiveTime::from_hms(next_time.0, next_time.1, 0));
     }
 
     #[task(binds = GPIOB, resources = [rotary, mode, toggle_switch, rotary_switch], spawn = [ knob_turned, poll_toggle_switch, poll_rotary_switch ])]
@@ -1030,8 +1016,8 @@ const APP: () = {
             cx.spawn.handle_event_alarm(time).unwrap();
         }
         if a2 && *cx.resources.mode == OperatingMode::Normal {
-            cx.spawn.refresh_bme680(1).unwrap();
-            cx.spawn.refresh_time(time, 0).unwrap();
+            cx.spawn.refresh_bme680().unwrap();
+            cx.spawn.refresh_time(time).unwrap();
         }
 
         cx.resources.rtc_int_pin.clear_interrupt();
@@ -1087,9 +1073,14 @@ fn draw_text(display: &mut Display2in13, text: &str, line: u8, x: u8) {
         .draw(display);
 }
 
-fn draw_hour(display: &mut Display2in13, time: &NaiveTime, line: u8, x: u8) {
-    clear_line(display, line);
-    draw_text(display, NUM_CONV[time.hour() as usize], line, x);
-    draw_text(display, ":", line, x + 2);
-    draw_text(display, NUM_CONV[time.minute() as usize], line, x + 3);
+fn draw_config_hint(display: &mut Display2in13, is_config: bool) {
+    let text = if is_config { "C" } else { " " };
+
+    let _ = Text::new(text, Point::new(SCR_CONFIG_X_OFF, SCR_CONFIG_Y_OFF))
+        .into_styled(text_style!(
+            font = FONT_CONFIG,
+            text_color = Black,
+            background_color = White
+        ))
+        .draw(display);
 }

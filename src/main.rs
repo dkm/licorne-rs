@@ -29,7 +29,7 @@ use core::time::Duration;
 
 use embedded_hal::{
     blocking::delay::{DelayMs, DelayUs},
-    digital::v1::InputPin,
+    digital::v2::InputPin,
 };
 
 use cortex_m_semihosting::hprintln;
@@ -542,8 +542,8 @@ const APP: () = {
         epd.update_and_display_frame(&mut spi0, &display.buffer())
             .unwrap();
 
-        let mut rotary_pin = portb.pb7.into_pull_up_input();
-        let init_state = rotary_pin.is_high();
+        let rotary_pin = portb.pb7.into_pull_up_input();
+        let init_state = rotary_pin.is_high().unwrap();
         let mut rotary_switch = RotarySwitchT::new(rotary_pin, init_state);
         rotary_switch
             .pin
@@ -557,7 +557,7 @@ const APP: () = {
             .set_interrupt_mode(InterruptMode::EdgeBoth);
         toggle_switch.pin.clear_interrupt();
 
-        let switch_state = toggle_switch.pin.is_high();
+        let switch_state = toggle_switch.pin.is_high().unwrap();
 
         let mode = if switch_state {
             OperatingMode::Configuration(SubConfig::Hour)
@@ -672,7 +672,7 @@ const APP: () = {
     )]
     fn poll_toggle_switch(ctx: poll_toggle_switch::Context) {
         // Poll button
-        let pressed: bool = ctx.resources.toggle_switch.pin.is_high();
+        let pressed: bool = ctx.resources.toggle_switch.pin.is_high().unwrap();
 
         // Update state
         let edge = ctx.resources.toggle_switch.debouncer.update(pressed);
@@ -714,7 +714,7 @@ const APP: () = {
     )]
     fn poll_rotary_switch(ctx: poll_rotary_switch::Context) {
         // Poll button
-        let pressed: bool = ctx.resources.rotary_switch.pin.is_low();
+        let pressed: bool = ctx.resources.rotary_switch.pin.is_low().unwrap();
 
         // Update state
         let edge = ctx.resources.rotary_switch.debouncer.update(pressed);

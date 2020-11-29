@@ -625,22 +625,26 @@ const APP: () = {
                 ctx.resources.screen.lock(|screen| {
                     screen
                         .epd
-                        .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLUT::FULL)
+                        .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLUT::QUICK)
                         .unwrap();
                     draw_config_hint(&mut screen.display, false);
                 });
+
                 ctx.resources.rotary.pin_a().clear_interrupt();
                 ctx.resources
                     .rotary
                     .pin_a()
                     .set_interrupt_mode(InterruptMode::Disabled);
                 ctx.resources.rotary.pin_b().clear_interrupt();
+
                 ctx.resources
                     .rotary
                     .pin_b()
                     .set_interrupt_mode(InterruptMode::Disabled);
+
                 let new_time =
                     NaiveTime::from_hms(ctx.resources.new_time.0, ctx.resources.new_time.1, 0);
+
                 ctx.resources.rtc.lock(|rtc| {
                     rtc.set_time(&new_time).unwrap();
                 });

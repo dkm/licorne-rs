@@ -17,10 +17,7 @@ extern crate tm4c123x_hal;
 extern crate tm4c_hal;
 extern crate ws2812_spi;
 
-use heapless::{
-    consts::{U20, U4, U5},
-    String,
-};
+use heapless::{consts::U5, String};
 
 use ufmt::uwrite;
 
@@ -40,13 +37,8 @@ use cortex_m_semihosting::hprintln;
 use debouncr::{debounce_stateful_12, DebouncerStateful, Edge, Repeat12};
 
 use embedded_graphics::{
-    fonts::{Font12x16, Font24x32, Font6x12, Text},
-    pixelcolor::BinaryColor::Off as White,
-    pixelcolor::BinaryColor::On as Black,
-    prelude::*,
-    primitive_style,
-    primitives::Rectangle,
-    text_style,
+    fonts::Text, pixelcolor::BinaryColor::Off as White, pixelcolor::BinaryColor::On as Black,
+    prelude::*, text_style,
 };
 
 use cortex_m::peripheral::DWT;
@@ -80,8 +72,9 @@ macro_rules! debug_only {
 
 const NUM_LEDS: usize = 8;
 
-const FONT_TIME: embedded_graphics::fonts::Font24x32 = Font24x32;
-const FONT_RIGHT_BAR: embedded_graphics::fonts::Font12x16 = Font12x16;
+const FONT_TIME: embedded_junkyardfont::FontJunkyard = embedded_junkyardfont::FontJunkyard;
+//const FONT_TIME: embedded_graphics::fonts::Font24x32 = Font24x32;
+const FONT_RIGHT_BAR: embedded_graphics::fonts::Font12x16 = embedded_graphics::fonts::Font12x16;
 
 const SCR_HOUR_X_OFF: i32 = 5;
 const SCR_HOUR_Y_OFF: i32 = 5;
@@ -92,9 +85,10 @@ const SCR_RIGHT_BAR_TEMP_Y_OFF: i32 = 5;
 const SCR_RIGHT_BAR_HUMID_X_OFF: i32 = 200;
 const SCR_RIGHT_BAR_HUMID_Y_OFF: i32 = 18 + SCR_RIGHT_BAR_TEMP_Y_OFF;
 
-const FONT_CONFIG: embedded_graphics::fonts::Font12x16 = Font12x16;
-const SCR_CONFIG_X_OFF : i32 = 200;
-const SCR_CONFIG_Y_OFF : i32 = 100;
+
+const FONT_CONFIG: embedded_graphics::fonts::Font12x16 = embedded_graphics::fonts::Font12x16;
+const SCR_CONFIG_X_OFF: i32 = 200;
+const SCR_CONFIG_Y_OFF: i32 = 100;
 
 pub struct SimpleAsmDelay {
     freq: u32,
@@ -384,8 +378,6 @@ const APP: () = {
 
         // Cortex-M peripherals
         // : cortex_m::Peripherals
-        let cp = cx.core;
-
         let i2c_bme680 = I2c::i2c1(
             p.I2C1,
             (
@@ -398,6 +390,7 @@ const APP: () = {
             &clocks,
             &sc.power_control,
         );
+
         let mut bme680 = Bme680::init(
             i2c_bme680,
             SimpleAsmDelay { freq: 80_000_000 },
@@ -437,12 +430,12 @@ const APP: () = {
             &sc.power_control,
         );
 
-        let mut leds = ws2812::Ws2812::new(spi_ws2812);
+        let leds = ws2812::Ws2812::new(spi_ws2812);
 
-        let mut rot_pinA = portb.pb1.into_pull_up_input();
-        let mut rot_pinB = portb.pb4.into_pull_up_input();
+        let rot_pinA = portb.pb1.into_pull_up_input();
+        let rot_pinB = portb.pb4.into_pull_up_input();
 
-        let mut rotary = Rotary::new(rot_pinA, rot_pinB);
+        let rotary = Rotary::new(rot_pinA, rot_pinB);
 
         // GPIO for interrupt
         // SQW/INT pin wired to PD6
@@ -470,12 +463,9 @@ const APP: () = {
         )
         .unwrap();
 
-        let time = NaiveTime::from_hms(23, 00, 3);
-        //        rtc.set_time(&time).unwrap();
-
         let time = rtc.get_time().unwrap();
-        cx.spawn.refresh_time(time);
-        cx.spawn.refresh_bme680();
+        cx.spawn.refresh_time(time).unwrap();
+        cx.spawn.refresh_bme680().unwrap();
 
         let ranges = [
             TimeRange {
@@ -525,7 +515,7 @@ const APP: () = {
                 state = FSMState::InRange(i);
                 debug_only! {hprintln!("In range: {}:{}", range.start, range.end).unwrap()}
 
-                cx.spawn.set_leds(0, 1, range.in_color);
+                cx.spawn.set_leds(0, 1, range.in_color).unwrap();
 
                 // draw_text(&mut display, "In: ", 1, 0);
                 // draw_text(&mut display, range.name, 1, 4);
@@ -575,7 +565,7 @@ const APP: () = {
             OperatingMode::Normal
         };
 
-        cx.spawn.change_mode(mode);
+        cx.spawn.change_mode(mode).unwrap();
 
         debug_only! {
             hprintln!("init done, mode will be {:?}, switch is {:?} debouncer is {:?}",
@@ -650,7 +640,7 @@ const APP: () = {
                 });
             }
             OperatingMode::Configuration(_) => {
-                let mut new_time = ctx.resources.rtc.lock(|rtc| {
+                let new_time = ctx.resources.rtc.lock(|rtc| {
                     let t = rtc.get_time().unwrap();
                     (t.hour(), t.minute())
                 });
@@ -672,7 +662,7 @@ const APP: () = {
                     .set_interrupt_mode(InterruptMode::EdgeBoth);
             }
         }
-        ctx.spawn.refresh_epd();
+        ctx.spawn.refresh_epd().unwrap();
     }
 
     #[task(
@@ -692,10 +682,11 @@ const APP: () = {
         if edge == Some(Edge::Rising) {
             ctx.resources.toggle_switch.sample_count = 0;
             ctx.spawn
-                .change_mode(OperatingMode::Configuration(SubConfig::Hour));
+                .change_mode(OperatingMode::Configuration(SubConfig::Hour))
+                .unwrap();
         } else if edge == Some(Edge::Falling) {
             ctx.resources.toggle_switch.sample_count = 0;
-            ctx.spawn.change_mode(OperatingMode::Normal);
+            ctx.spawn.change_mode(OperatingMode::Normal).unwrap();
         } else if ctx.resources.toggle_switch.sample_count <= DEBOUNCE_SAMPLE_CNT {
             // Re-schedule the timer interrupt to get enough samples
             ctx.schedule
@@ -782,7 +773,7 @@ const APP: () = {
             cx.resources.leds_data[0..].rotate_left(num);
         }
 
-        cx.spawn.refresh_leds();
+        cx.spawn.refresh_leds().unwrap();
     }
 
     #[task(priority = 3, resources = [leds_data], spawn = [refresh_leds])]
@@ -790,21 +781,20 @@ const APP: () = {
         for led in &mut cx.resources.leds_data[start_index..start_index + number_of_leds] {
             *led = color;
         }
-        cx.spawn.refresh_leds();
+        cx.spawn.refresh_leds().unwrap();
     }
 
     #[task(priority = 3, spawn = [set_leds], resources = [rtc, screen, ranges, state, next_or_current_range])]
-    fn handle_event_alarm(mut cx: handle_event_alarm::Context, time: NaiveTime) {
+    fn handle_event_alarm(cx: handle_event_alarm::Context, time: NaiveTime) {
         debug_only! {hprintln!("handle event alarm! {} {}", time.hour(), time.minute()).unwrap()}
-
-        clear_line(&mut cx.resources.screen.display, 1);
 
         if let Some(new_state) = match cx.resources.state {
             FSMState::Idle => None,
             FSMState::WaitNextRange(ref range) => {
                 debug_only! {hprintln!("Enter").unwrap()}
                 cx.spawn
-                    .set_leds(0, 1, cx.resources.ranges[*range].in_color);
+                    .set_leds(0, 1, cx.resources.ranges[*range].in_color)
+                    .unwrap();
 
                 debug_only! {hprintln!("Time: {}, Alarm :{}", time, cx.resources.ranges[*range].end).unwrap()}
                 cx.resources
@@ -818,7 +808,7 @@ const APP: () = {
             FSMState::InRange(ref range) => {
                 debug_only! {hprintln!("Exit").unwrap()}
 
-                cx.spawn.set_leds(0, 1, colors::GREEN);
+                cx.spawn.set_leds(0, 1, colors::GREEN).unwrap();
                 if *range == cx.resources.ranges.len() - 1 {
                     cx.resources
                         .rtc
@@ -879,7 +869,8 @@ const APP: () = {
                 ""
             },
             humid
-        );
+        )
+        .unwrap();
 
         cx.resources.screen.lock(|screen| {
             let _ = Text::new(
@@ -911,18 +902,27 @@ const APP: () = {
         cx.resources.screen.lock(|screen| {
             // Only "HH:MM"
             let mut hhmm: String<U5> = String::new();
-            uwrite!(hhmm, "{}:{}", time.hour(), time.minute());
+
+            uwrite!(
+                hhmm,
+                "{}{}:{}{}",
+                if time.hour() < 10 { "0" } else { "" },
+                time.hour(),
+                if time.minute() < 10 { "0" } else { "" },
+                time.minute()
+            )
+            .unwrap();
 
             let _ = Text::new(&hhmm, Point::new(SCR_HOUR_X_OFF as i32, SCR_HOUR_Y_OFF))
                 .into_styled(text_style!(
-                    font = FONT,
+                    font = FONT_TIME,
                     text_color = Black,
                     background_color = White
                 ))
                 .draw(&mut screen.display);
         });
 
-        cx.spawn.refresh_epd();
+        cx.spawn.refresh_epd().unwrap();
         debug_only! {hprintln!("refresh time with: {} {}", time.hour(), time.minute()).unwrap()}
     }
 
@@ -932,7 +932,7 @@ const APP: () = {
 
         match dir {
             Direction::Clockwise => {
-                cx.spawn.rotate_leds(true, 1);
+                cx.spawn.rotate_leds(true, 1).unwrap();
                 if *cx.resources.mode == OperatingMode::Configuration(SubConfig::Hour) {
                     next_time.0 += 1;
                 } else {
@@ -940,7 +940,7 @@ const APP: () = {
                 }
             }
             Direction::CounterClockwise => {
-                cx.spawn.rotate_leds(false, 1);
+                cx.spawn.rotate_leds(false, 1).unwrap();
                 if *cx.resources.mode == OperatingMode::Configuration(SubConfig::Hour) {
                     next_time.0 -= 1;
                 } else {
@@ -951,7 +951,8 @@ const APP: () = {
         }
 
         cx.spawn
-            .refresh_time(NaiveTime::from_hms(next_time.0, next_time.1, 0));
+            .refresh_time(NaiveTime::from_hms(next_time.0, next_time.1, 0))
+            .unwrap();
     }
 
     #[task(binds = GPIOB, resources = [rotary, mode, toggle_switch, rotary_switch], spawn = [ knob_turned, poll_toggle_switch, poll_rotary_switch ])]
@@ -972,12 +973,12 @@ const APP: () = {
             //         .unwrap()
             // }
 
-            cx.spawn.poll_toggle_switch();
+            cx.spawn.poll_toggle_switch().unwrap();
         }
 
         if cx.resources.rotary_switch.pin.get_interrupt_status() {
             cx.resources.rotary_switch.pin.clear_interrupt();
-            cx.spawn.poll_rotary_switch();
+            cx.spawn.poll_rotary_switch().unwrap();
         }
 
         match *cx.resources.mode {
@@ -987,7 +988,7 @@ const APP: () = {
                 let dir = cx.resources.rotary.update().unwrap();
                 match dir {
                     Direction::Clockwise | Direction::CounterClockwise => {
-                        cx.spawn.knob_turned(dir);
+                        cx.spawn.knob_turned(dir).unwrap();
                     }
                     Direction::None => {}
                 }
@@ -1033,45 +1034,6 @@ const APP: () = {
         fn UART4();
     }
 };
-
-const FONT: embedded_graphics::fonts::Font24x32 = Font24x32;
-const FONT_SZ: Size = embedded_graphics::fonts::Font24x32::CHARACTER_SIZE;
-
-fn fill_line(
-    display: &mut Display2in13,
-    line: u8,
-    color: embedded_graphics::pixelcolor::BinaryColor,
-) {
-    let style = primitive_style!(fill_color = color);
-    let line = line as i32;
-
-    let h = FONT_SZ.height as i32;
-
-    Rectangle::new(
-        Point::new(0, line * h),
-        Point::new(display.size().width as i32, (line + 1) * h),
-    )
-    .into_styled(style)
-    .draw(display)
-    .unwrap();
-}
-
-fn clear_line(display: &mut Display2in13, line: u8) {
-    fill_line(display, line, White);
-}
-
-fn draw_text(display: &mut Display2in13, text: &str, line: u8, x: u8) {
-    let y = line as i32 * FONT_SZ.height as i32;
-    let x = x as i32 * FONT_SZ.width as i32;
-
-    let _ = Text::new(text, Point::new(x as i32, y))
-        .into_styled(text_style!(
-            font = FONT,
-            text_color = Black,
-            background_color = White
-        ))
-        .draw(display);
-}
 
 fn draw_config_hint(display: &mut Display2in13, is_config: bool) {
     let text = if is_config { "C" } else { " " };

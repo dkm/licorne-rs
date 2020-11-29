@@ -76,8 +76,8 @@ const FONT_TIME: embedded_junkyardfont::FontJunkyard = embedded_junkyardfont::Fo
 //const FONT_TIME: embedded_graphics::fonts::Font24x32 = Font24x32;
 const FONT_RIGHT_BAR: embedded_graphics::fonts::Font12x16 = embedded_graphics::fonts::Font12x16;
 
-const SCR_HOUR_X_OFF: i32 = 5;
-const SCR_HOUR_Y_OFF: i32 = 5;
+const SCR_HOUR_X_OFF: i32 = 1;
+const SCR_HOUR_Y_OFF: i32 = 20;
 
 const SCR_RIGHT_BAR_TEMP_X_OFF: i32 = 200;
 const SCR_RIGHT_BAR_TEMP_Y_OFF: i32 = 5;
@@ -85,6 +85,8 @@ const SCR_RIGHT_BAR_TEMP_Y_OFF: i32 = 5;
 const SCR_RIGHT_BAR_HUMID_X_OFF: i32 = 200;
 const SCR_RIGHT_BAR_HUMID_Y_OFF: i32 = 18 + SCR_RIGHT_BAR_TEMP_Y_OFF;
 
+const SCR_RIGHT_BAR_ERRCNT_X_OFF: i32 = 200;
+const SCR_RIGHT_BAR_ERRCNT_Y_OFF: i32 = 18 + SCR_RIGHT_BAR_HUMID_Y_OFF;
 
 const FONT_CONFIG: embedded_graphics::fonts::Font12x16 = embedded_graphics::fonts::Font12x16;
 const SCR_CONFIG_X_OFF: i32 = 200;
@@ -313,6 +315,8 @@ const APP: () = {
         new_time: (u32, u32),
 
         rotary: RotaryT,
+
+        i2c_error: u32,
 
         next_or_current_range: usize,
         ranges: [TimeRange; 3],
@@ -597,6 +601,8 @@ const APP: () = {
             rotary,
             new_time: (0, 0),
 
+            i2c_error: 0,
+
             toggle_switch,
             rotary_switch,
         }
@@ -839,20 +845,31 @@ const APP: () = {
         });
     }
 
-    #[task(priority = 1, resources = [screen, bme680], spawn = [refresh_epd])]
+    #[task(priority = 1, resources = [screen, bme680, i2c_error], spawn = [refresh_epd])]
     fn refresh_bme680(mut cx: refresh_bme680::Context) {
-        cx.resources
-            .bme680
-            .set_sensor_mode(PowerMode::ForcedMode)
-            .unwrap();
-        let (data, _state) = cx.resources.bme680.get_sensor_data().unwrap();
+        let (temp, _pres, humid, _gas): (i32, i32, i32, i32);
 
-        let (temp, pres, humid, gas): (i32, i32, i32, i32) = (
-            data.temperature_celsius() as i32,
-            data.pressure_hpa() as i32,
-            data.humidity_percent() as i32,
-            data.gas_resistance_ohm() as i32,
-        );
+        if let Ok(_) = cx.resources.bme680.set_sensor_mode(PowerMode::ForcedMode) {
+            let (data, _state) = cx.resources.bme680.get_sensor_data().unwrap();
+
+            temp = data.temperature_celsius() as i32;
+            _pres = data.pressure_hpa() as i32;
+            humid = data.humidity_percent() as i32;
+            _gas = data.gas_resistance_ohm() as i32;
+        } else {
+            // For some reason, the bme680 seems to stop responding and a hw
+            // reset is needed to make it work again. Maybe caused by the
+            // current spaghetti setup used for prototyping.
+            // Simply count the errors
+            temp = 0i32;
+            _pres = 0i32;
+            humid = 0i32;
+            _gas = 0i32;
+            *cx.resources.i2c_error += 1;
+            debug_only! {hprintln!("I2C error for bme").unwrap()}
+        }
+
+        let cur_i2c_error = *cx.resources.i2c_error;
 
         let mut temp_s: String<U5> = String::new();
         uwrite!(temp_s, "{}{}°C", if temp < 10 { " " } else { "" }, temp).unwrap();
@@ -887,6 +904,20 @@ const APP: () = {
             let _ = Text::new(
                 &humid_s,
                 Point::new(SCR_RIGHT_BAR_HUMID_X_OFF, SCR_RIGHT_BAR_HUMID_Y_OFF),
+            )
+            .into_styled(text_style!(
+                font = FONT_RIGHT_BAR,
+                text_color = Black,
+                background_color = White
+            ))
+            .draw(&mut screen.display);
+
+            let mut errcnt_s: String<U5> = String::new();
+            uwrite!(errcnt_s, "#{}", cur_i2c_error).unwrap();
+
+            let _ = Text::new(
+                &errcnt_s,
+                Point::new(SCR_RIGHT_BAR_ERRCNT_X_OFF, SCR_RIGHT_BAR_ERRCNT_Y_OFF),
             )
             .into_styled(text_style!(
                 font = FONT_RIGHT_BAR,

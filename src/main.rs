@@ -251,11 +251,14 @@ pub enum OperatingMode {
     Configuration(SubConfig),
 }
 
+const MAX_NUM_QUICK_REFRESH: u32 = 10;
+
 pub struct Screen {
     epd: EpdT,
     display: Display2in13,
     spi: Spi0T,
     delay: SimpleAsmDelay,
+    quick_refresh_count: u32,
 }
 
 pub struct Switch<P>
@@ -415,6 +418,9 @@ const APP: () = {
         let mut delay = SimpleAsmDelay { freq: 80_000_000 };
         let mut epd =
             EPD2in13::new(&mut spi0, cs_pin, busy_pin, dc_pin, rst_pin, &mut delay).unwrap();
+
+        epd.set_refresh(&mut spi0, &mut delay, RefreshLUT::QUICK)
+            .unwrap();
 
         let mut display = Display2in13::default();
         display.set_rotation(DisplayRotation::Rotate90);
@@ -588,6 +594,7 @@ const APP: () = {
                 display,
                 spi: spi0,
                 delay,
+                quick_refresh_count: 0,
             },
             rtc_int_pin,
             leds,
@@ -623,10 +630,6 @@ const APP: () = {
         match *ctx.resources.mode {
             OperatingMode::Normal => {
                 ctx.resources.screen.lock(|screen| {
-                    screen
-                        .epd
-                        .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLUT::QUICK)
-                        .unwrap();
                     draw_config_hint(&mut screen.display, false);
                 });
 
@@ -798,7 +801,7 @@ const APP: () = {
     fn handle_event_alarm(cx: handle_event_alarm::Context, time: NaiveTime) {
         debug_only! {hprintln!("handle event alarm! {} {}", time.hour(), time.minute()).unwrap()}
 
-        if let Some(new_state) = match cx.resources.state {
+        let ns = match cx.resources.state {
             FSMState::Idle => None,
             FSMState::WaitNextRange(ref range) => {
                 debug_only! {hprintln!("Enter").unwrap()}
@@ -833,7 +836,9 @@ const APP: () = {
                     Some(FSMState::WaitNextRange(*range + 1))
                 }
             }
-        } {
+        };
+
+        if let Some(new_state) = ns {
             *cx.resources.state = new_state;
         }
     }
@@ -841,11 +846,27 @@ const APP: () = {
     #[task(priority = 1, resources = [screen])]
     fn refresh_epd(mut cx: refresh_epd::Context) {
         cx.resources.screen.lock(|screen| {
+            if screen.quick_refresh_count > MAX_NUM_QUICK_REFRESH {
+                screen
+                    .epd
+                    .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLUT::FULL)
+                    .unwrap();
+            }
+
             screen
                 .epd
                 .update_and_display_frame(&mut screen.spi, &screen.display.buffer())
                 .unwrap();
-            screen.epd.sleep(&mut screen.spi).unwrap();
+
+            if screen.quick_refresh_count > MAX_NUM_QUICK_REFRESH {
+                screen
+                    .epd
+                    .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLUT::QUICK)
+                    .unwrap();
+                screen.quick_refresh_count = 0;
+            }
+
+            //            screen.epd.sleep(&mut screen.spi).unwrap();
         });
     }
 

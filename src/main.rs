@@ -255,7 +255,6 @@ const MAX_NUM_QUICK_REFRESH: u32 = 10;
 
 pub struct Screen {
     epd: EpdT,
-    display: Display2in13,
     spi: Spi0T,
     delay: SimpleAsmDelay,
     quick_refresh_count: u32,
@@ -303,6 +302,7 @@ const APP: () = {
 
         // e-ink
         screen: Screen,
+        display: Display2in13,
 
         rtc_int_pin: PD6<Input<PullUp>>,
 
@@ -418,9 +418,6 @@ const APP: () = {
         let mut delay = SimpleAsmDelay { freq: 80_000_000 };
         let mut epd =
             EPD2in13::new(&mut spi0, cs_pin, busy_pin, dc_pin, rst_pin, &mut delay).unwrap();
-
-        epd.set_refresh(&mut spi0, &mut delay, RefreshLUT::QUICK)
-            .unwrap();
 
         let mut display = Display2in13::default();
         display.set_rotation(DisplayRotation::Rotate90);
@@ -552,6 +549,11 @@ const APP: () = {
         epd.update_and_display_frame(&mut spi0, &display.buffer())
             .unwrap();
 
+        // enable partial refresh from now on
+        epd.set_refresh(&mut spi0, &mut delay, RefreshLUT::QUICK)
+            .unwrap();
+
+
         let rotary_pin = portb.pb7.into_pull_up_input();
         let init_state = rotary_pin.is_high().unwrap();
         let mut rotary_switch = RotarySwitchT::new(rotary_pin, init_state);
@@ -591,11 +593,12 @@ const APP: () = {
             rtc,
             screen: Screen {
                 epd,
-                display,
                 spi: spi0,
                 delay,
                 quick_refresh_count: 0,
             },
+            display,
+
             rtc_int_pin,
             leds,
             leds_data: [colors::BLACK; NUM_LEDS],
@@ -616,7 +619,8 @@ const APP: () = {
     }
 
     #[task(
-        resources = [mode, rotary, screen, new_time, rtc],
+        priority = 1,
+        resources = [mode, rotary, display, new_time, rtc],
         spawn = [refresh_epd]
     )]
     fn change_mode(mut ctx: change_mode::Context, mode: OperatingMode) {
@@ -627,11 +631,9 @@ const APP: () = {
 
         *ctx.resources.mode = mode;
 
-        match *ctx.resources.mode {
-            OperatingMode::Normal => {
-                ctx.resources.screen.lock(|screen| {
-                    draw_config_hint(&mut screen.display, false);
-                });
+        match *ctx.resources.mode { OperatingMode::Normal => {
+            ctx.resources.display.lock(|mut display| { draw_config_hint(&mut
+            display, false); });
 
                 ctx.resources.rotary.pin_a().clear_interrupt();
                 ctx.resources
@@ -658,8 +660,8 @@ const APP: () = {
                     (t.hour(), t.minute())
                 });
 
-                ctx.resources.screen.lock(|screen| {
-                    draw_config_hint(&mut screen.display, true);
+                ctx.resources.display.lock(|display| {
+                    draw_config_hint(display, true);
                 });
                 *ctx.resources.new_time = new_time;
 
@@ -797,8 +799,8 @@ const APP: () = {
         cx.spawn.refresh_leds().unwrap();
     }
 
-    #[task(priority = 3, spawn = [set_leds], resources = [rtc, screen, ranges, state, next_or_current_range])]
-    fn handle_event_alarm(cx: handle_event_alarm::Context, time: NaiveTime) {
+    #[task(priority = 3, spawn = [set_leds], resources = [rtc, ranges, state, next_or_current_range])]
+    fn handle_event_alarm(cx: handle_event_alarm::Context, _time: NaiveTime) {
         debug_only! {hprintln!("handle event alarm! {} {}", time.hour(), time.minute()).unwrap()}
 
         let ns = match cx.resources.state {
@@ -843,35 +845,60 @@ const APP: () = {
         }
     }
 
-    #[task(priority = 1, resources = [screen])]
+    #[task(priority = 5, resources = [screen, display])]
     fn refresh_epd(mut cx: refresh_epd::Context) {
-        cx.resources.screen.lock(|screen| {
-            if screen.quick_refresh_count > MAX_NUM_QUICK_REFRESH {
-                screen
-                    .epd
-                    .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLUT::FULL)
-                    .unwrap();
-            }
+        let do_full_refresh = cx.resources.screen.quick_refresh_count > MAX_NUM_QUICK_REFRESH;
 
-            screen
+        let mut errcnt_s: String<U5> = String::new();
+        uwrite!(errcnt_s, "#{}", cx.resources.screen.quick_refresh_count).unwrap();
+
+        let _ = Text::new(
+            &errcnt_s,
+            Point::new(SCR_RIGHT_BAR_ERRCNT_X_OFF, SCR_RIGHT_BAR_ERRCNT_Y_OFF + 16),
+        )
+            .into_styled(text_style!(
+                font = FONT_RIGHT_BAR,
+                text_color = Black,
+                background_color = White
+            ))
+            .draw(cx.resources.display);
+
+
+        if do_full_refresh {
+            cx.resources.screen.quick_refresh_count = 0;
+            cx.resources
+                .screen
                 .epd
-                .update_and_display_frame(&mut screen.spi, &screen.display.buffer())
+                .set_refresh(
+                    &mut cx.resources.screen.spi,
+                    &mut cx.resources.screen.delay,
+                    RefreshLUT::FULL,
+                )
                 .unwrap();
+        }
 
-            if screen.quick_refresh_count > MAX_NUM_QUICK_REFRESH {
-                screen
-                    .epd
-                    .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLUT::QUICK)
-                    .unwrap();
-                screen.quick_refresh_count = 0;
-            }
+        cx.resources
+            .screen
+            .epd
+            .update_and_display_frame(&mut cx.resources.screen.spi, &cx.resources.display.buffer())
+            .unwrap();
 
-            //            screen.epd.sleep(&mut screen.spi).unwrap();
-        });
+        if do_full_refresh {
+            cx.resources
+                .screen
+                .epd
+                .set_refresh(
+                    &mut cx.resources.screen.spi,
+                    &mut cx.resources.screen.delay,
+                    RefreshLUT::QUICK,
+                )
+                .unwrap();
+        }
+        cx.resources.screen.quick_refresh_count += 1;
     }
 
-    #[task(priority = 1, resources = [screen, bme680, i2c_error], spawn = [refresh_epd])]
-    fn refresh_bme680(mut cx: refresh_bme680::Context) {
+    #[task(priority = 5, resources = [display, bme680, i2c_error], spawn = [refresh_epd])]
+    fn refresh_bme680(cx: refresh_bme680::Context) {
         let (temp, _pres, humid, _gas): (i32, i32, i32, i32);
 
         if let Ok(_) = cx.resources.bme680.set_sensor_mode(PowerMode::ForcedMode) {
@@ -914,48 +941,46 @@ const APP: () = {
         )
         .unwrap();
 
-        cx.resources.screen.lock(|screen| {
-            let _ = Text::new(
-                &temp_s,
-                Point::new(SCR_RIGHT_BAR_TEMP_X_OFF, SCR_RIGHT_BAR_TEMP_Y_OFF),
-            )
-            .into_styled(text_style!(
-                font = FONT_RIGHT_BAR,
-                text_color = Black,
-                background_color = White
-            ))
-            .draw(&mut screen.display);
+        let _ = Text::new(
+            &temp_s,
+            Point::new(SCR_RIGHT_BAR_TEMP_X_OFF, SCR_RIGHT_BAR_TEMP_Y_OFF),
+        )
+        .into_styled(text_style!(
+            font = FONT_RIGHT_BAR,
+            text_color = Black,
+            background_color = White
+        ))
+        .draw(cx.resources.display);
 
-            let _ = Text::new(
-                &humid_s,
-                Point::new(SCR_RIGHT_BAR_HUMID_X_OFF, SCR_RIGHT_BAR_HUMID_Y_OFF),
-            )
-            .into_styled(text_style!(
-                font = FONT_RIGHT_BAR,
-                text_color = Black,
-                background_color = White
-            ))
-            .draw(&mut screen.display);
+        let _ = Text::new(
+            &humid_s,
+            Point::new(SCR_RIGHT_BAR_HUMID_X_OFF, SCR_RIGHT_BAR_HUMID_Y_OFF),
+        )
+        .into_styled(text_style!(
+            font = FONT_RIGHT_BAR,
+            text_color = Black,
+            background_color = White
+        ))
+        .draw(cx.resources.display);
 
-            let mut errcnt_s: String<U5> = String::new();
-            uwrite!(errcnt_s, "#{}", cur_i2c_error).unwrap();
+        let mut errcnt_s: String<U5> = String::new();
+        uwrite!(errcnt_s, "#{}", cur_i2c_error).unwrap();
 
-            let _ = Text::new(
-                &errcnt_s,
-                Point::new(SCR_RIGHT_BAR_ERRCNT_X_OFF, SCR_RIGHT_BAR_ERRCNT_Y_OFF),
-            )
-            .into_styled(text_style!(
-                font = FONT_RIGHT_BAR,
-                text_color = Black,
-                background_color = White
-            ))
-            .draw(&mut screen.display);
-        });
+        let _ = Text::new(
+            &errcnt_s,
+            Point::new(SCR_RIGHT_BAR_ERRCNT_X_OFF, SCR_RIGHT_BAR_ERRCNT_Y_OFF),
+        )
+        .into_styled(text_style!(
+            font = FONT_RIGHT_BAR,
+            text_color = Black,
+            background_color = White
+        ))
+        .draw(cx.resources.display);
     }
 
-    #[task(priority = 1, resources = [screen], spawn = [refresh_epd])]
+    #[task(priority = 1, resources = [display], spawn = [refresh_epd])]
     fn refresh_time(mut cx: refresh_time::Context, time: NaiveTime) {
-        cx.resources.screen.lock(|screen| {
+        cx.resources.display.lock(|display| {
             // Only "HH:MM"
             let mut hhmm: String<U5> = String::new();
 
@@ -975,7 +1000,7 @@ const APP: () = {
                     text_color = Black,
                     background_color = White
                 ))
-                .draw(&mut screen.display);
+                .draw(display);
         });
 
         cx.spawn.refresh_epd().unwrap();
@@ -1088,6 +1113,9 @@ const APP: () = {
     }
     extern "C" {
         fn UART4();
+    }
+    extern "C" {
+        fn UART2();
     }
 };
 

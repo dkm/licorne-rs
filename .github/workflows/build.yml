@@ -26,3 +26,13 @@ jobs:
           use-cross: true
           command: build
           args: --release --target=${{ matrix.target }}
+      - uses: actions-rs/cargo@v1
+        with:
+          use-cross: true
+          command: build
+          args: --release --target=${{ matrix.target }} --features=usesemihosting,usedrogue
+      - uses: actions-rs/cargo@v1
+        with:
+          use-cross: true
+          command: build
+          args: --release --target=${{ matrix.target }} --features=usesemihosting

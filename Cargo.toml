@@ -25,7 +25,6 @@ panic = "abort"
 ws2812-spi = "0.3"
 rotary-encoder-hal = {git = "https://github.com/dkm/rotary-encoder-hal" , features = ["table-decoder"] }
 debouncr = "0.2"
-bme680 = "0.5"
 ufmt = "0.1"
 ##ws2812-spi = {git = "https://github.com/smart-leds-rs/ws2812-spi-rs"}
 ## tm4c123x-hal = {git = "https://github.com/thejpster/tm4c-hal.git", features = ["rt"]}
@@ -50,6 +49,10 @@ smart-leds = "0.3"
 epd-waveshare = {git = "https://github.com/caemor/epd-waveshare.git", rev="87e63741ef9335439d97f587a781630077be2515" }
 embedded-graphics = "0.6"
 cortex-m-rtic = "0.5"
+bme680 = { version = "0.5", optional = true }
+
+drogue-bme680 = { version = "0.3", optional = true }
+embedded-time = { version = "0.10", optional = true }
 
 [dependencies.heapless]
 version = "0.5"
@@ -76,7 +79,9 @@ version = "0.2"
 features = ["unproven"]
 
 [features]
-default = []
+default = [ "bme680" ]
+
+usedrogue = [ "drogue-bme680", "embedded-time" ]
 
 ## This will use semihosting for printing debug trace.
-usesemihosting = []
+usesemihosting = [ "default" ]

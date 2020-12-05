@@ -17,13 +17,24 @@ extern crate tm4c123x_hal;
 extern crate tm4c_hal;
 extern crate ws2812_spi;
 
+#[cfg(feature = "usedrogue")]
+extern crate embedded_time;
+
 use heapless::{consts::U5, String};
 
 use ufmt::uwrite;
 
 use rtic::cyccnt::U32Ext as _;
 
+#[cfg(not(feature = "usedrogue"))]
 use bme680::{Bme680, I2CAddress, IIRFilterSize, OversamplingSetting, PowerMode, SettingsBuilder};
+
+#[cfg(feature = "usedrogue")]
+use drogue_bme680::{
+    Address, Bme680Controller, Bme680Sensor, Configuration, DelayMsWrapper, StaticProvider,
+};
+#[cfg(feature = "usedrogue")]
+use embedded_time::duration::Milliseconds;
 
 use core::time::Duration;
 
@@ -94,6 +105,13 @@ const SCR_CONFIG_Y_OFF: i32 = 100;
 
 pub struct SimpleAsmDelay {
     freq: u32,
+}
+
+#[cfg(feature = "usedrogue")]
+impl drogue_bme680::Delay for SimpleAsmDelay {
+    fn delay_ms(&self, duration_ms: u16) {
+        cortex_m::asm::delay(self.freq * cast::u32(duration_ms) * 1000 / 1_000_000)
+    }
 }
 
 impl DelayUs<u32> for SimpleAsmDelay {
@@ -192,7 +210,11 @@ type I2c1T = I2c<
         PA7<AlternateFunction<AF3, OpenDrain<Floating>>>,
     ),
 >;
+#[cfg(not(feature = "usedrogue"))]
 type Bme680T = Bme680<I2c1T, SimpleAsmDelay>;
+
+#[cfg(feature = "usedrogue")]
+type Bme680T =  Bme680Controller<I2c1T, SimpleAsmDelay, StaticProvider>;
 
 // spi for WS2812
 type Spi0T = Spi<
@@ -398,6 +420,7 @@ const APP: () = {
             &sc.power_control,
         );
 
+        #[cfg(not(feature = "usedrogue"))]
         let mut bme680 = Bme680::init(
             i2c_bme680,
             SimpleAsmDelay { freq: 80_000_000 },
@@ -405,6 +428,7 @@ const APP: () = {
         )
         .unwrap();
 
+        #[cfg(not(feature = "usedrogue"))]
         let settings = SettingsBuilder::new()
             .with_humidity_oversampling(OversamplingSetting::OS2x)
             .with_pressure_oversampling(OversamplingSetting::OS4x)
@@ -413,7 +437,16 @@ const APP: () = {
             .with_gas_measurement(Duration::from_millis(1500), 320, 25)
             .with_run_gas(true)
             .build();
+        #[cfg(not(feature = "usedrogue"))]
         bme680.set_sensor_settings(settings).unwrap();
+
+        #[cfg(feature = "usedrogue")]
+        let bme680_sensor = Bme680Sensor::from(i2c_bme680, Address::Primary).unwrap();
+
+        #[cfg(feature = "usedrogue")]
+        let mut bme680 =
+            Bme680Controller::new(bme680_sensor, SimpleAsmDelay { freq: 80_000_000 }, Configuration::standard(), StaticProvider(25))
+            .unwrap();
 
         let mut delay = SimpleAsmDelay { freq: 80_000_000 };
         let mut epd =
@@ -901,6 +934,7 @@ const APP: () = {
     fn refresh_bme680(cx: refresh_bme680::Context) {
         let (temp, _pres, humid, _gas): (i32, i32, i32, i32);
 
+        #[cfg(not(feature = "usedrogue"))]
         if let Ok(_) = cx.resources.bme680.set_sensor_mode(PowerMode::ForcedMode) {
             let (data, _state) = cx.resources.bme680.get_sensor_data().unwrap();
 
@@ -918,7 +952,36 @@ const APP: () = {
             humid = 0i32;
             _gas = 0i32;
             *cx.resources.i2c_error += 1;
-            debug_only! {hprintln!("I2C error for bme").unwrap()}
+            debug_only! {hprintln!("I2C bme680 error for bme").unwrap()}
+        }
+
+        #[cfg(feature = "usedrogue")]
+        if let Ok(opt_data) = cx.resources.bme680.measure(5, Milliseconds(50)) {
+            if let Some(data) = opt_data {
+                temp = data.temperature as i32;
+                _pres = if let Some(f) = data.pressure {f as i32 } else { 0 };
+                humid = data.humidity as i32;
+                _gas = data.gas_resistance as i32;
+            } else {
+                temp = 0i32;
+                _pres = 0i32;
+                humid = 0i32;
+                _gas = 0i32;
+                *cx.resources.i2c_error += 1;
+                debug_only! {hprintln!("I2C OK, but empty result from drogue_bme680").unwrap()}
+            }
+
+        } else {
+            // For some reason, the bme680 seems to stop responding and a hw
+            // reset is needed to make it work again. Maybe caused by the
+            // current spaghetti setup used for prototyping.
+            // Simply count the errors
+            temp = 0i32;
+            _pres = 0i32;
+            humid = 0i32;
+            _gas = 0i32;
+            *cx.resources.i2c_error += 1;
+            debug_only! {hprintln!("I2C error drogue_bme680 for bme").unwrap()}
         }
 
         let cur_i2c_error = *cx.resources.i2c_error;

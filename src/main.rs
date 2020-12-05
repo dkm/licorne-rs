@@ -83,8 +83,9 @@ macro_rules! debug_only {
 
 const NUM_LEDS: usize = 8;
 
-const FONT_TIME: embedded_junkyardfont::FontJunkyard = embedded_junkyardfont::FontJunkyard;
-//const FONT_TIME: embedded_graphics::fonts::Font24x32 = Font24x32;
+const FONT_TIME: embedded_various_fonts::fonts::GNUTypeWriter60Point =
+    embedded_various_fonts::fonts::GNUTypeWriter60Point {};
+
 const FONT_RIGHT_BAR: embedded_graphics::fonts::Font12x16 = embedded_graphics::fonts::Font12x16;
 
 const SCR_HOUR_X_OFF: i32 = 1;

@@ -32,7 +32,8 @@ ufmt = "0.1"
 ##tm4c-hal = "0.4"
 
 tm4c123x = { path = "../dslite2svd/crates/tm4c123x" }
-embedded-junkyardfont = {git = "https://github.com/dkm/embedded-junkyardfont/"}
+embedded-various-fonts = { git = "https://github.com/dkm/embedded-various-fonts" }
+
 tm4c-hal = { git = "https://github.com/dkm/tm4c-hal" }
 tm4c123x-hal = { git = "https://github.com/dkm/tm4c-hal", features = ["rt"] }
 

@@ -311,8 +311,14 @@ type ToggleSwitchT = Switch<ToggleSwitchPinT>;
 type RotarySwitchPinT = PB7<Input<PullUp>>;
 type RotarySwitchT = Switch<RotarySwitchPinT>;
 
-// At 80Mhz, this is ~2ms
-const POLL_SWITCH_PERIOD: u32 = 80_000;
+// Runnig at 80Mhz
+const ONE_MS: u32 = 80_000;
+
+const TRANSITION_STEPS: u32 = 50;
+const TRANSITION_STEP_CYCLES: u32 = (1000 / TRANSITION_STEPS) * ONE_MS;
+
+// At 80Mhz, this is ~1ms
+const POLL_SWITCH_PERIOD: u32 = 1 * ONE_MS;
 const DEBOUNCE_SAMPLE_CNT: u8 = 12;
 
 #[rtic::app(device = tm4c123x_hal::pac, peripherals = true, monotonic = rtic::cyccnt::CYCCNT)]
@@ -349,7 +355,7 @@ const APP: () = {
         state: FSMState,
     }
 
-    #[init(spawn = [refresh_bme680, refresh_time, change_mode, set_leds])]
+    #[init(spawn = [refresh_bme680, refresh_time, change_mode, transition_leds])]
     fn init(mut cx: init::Context) -> init::LateResources {
         // Initialize (enable) the monotonic timer (CYCCNT)
         cx.core.DCB.enable_trace();
@@ -578,24 +584,21 @@ const APP: () = {
                     ).unwrap()
                 }
 
-                //                draw_text(&mut display, "Wait: ", 1, 0);
-                //                draw_text(&mut display, range.name, 1, 6);
-
                 rtc.set_alarm1_hms(range.start).unwrap();
                 found = true;
                 break;
             }
 
+            cx.spawn.transition_leds(colors::GREEN, 50).unwrap();
+
             if time >= range.start && time < range.end {
                 state = FSMState::InRange(i);
                 debug_only! {hprintln!("In range: {}:{}", range.start, range.end).unwrap()}
 
-                cx.spawn.set_leds(0, 1, range.in_color).unwrap();
-
-                // draw_text(&mut display, "In: ", 1, 0);
-                // draw_text(&mut display, range.name, 1, 4);
+                cx.spawn.transition_leds(range.in_color, 50).unwrap();
 
                 rtc.set_alarm1_hms(range.end).unwrap();
+
                 found = true;
                 break;
             }
@@ -833,6 +836,42 @@ const APP: () = {
         }
     }
 
+    #[task(
+        priority = 1,
+        resources = [leds_data],
+        schedule = [transition_leds],
+        spawn = [refresh_leds]
+    )]
+    fn transition_leds(mut cx: transition_leds::Context, to: RGB8, trans_step: u32) {
+        cx.resources.leds_data.lock(|leds| {
+            for led in leds.iter_mut() {
+                if trans_step > 1 {
+                    let dr = to.r - led.r;
+                    let dg = to.g - led.g;
+                    let db = to.b - led.b;
+                    *led = RGB8::new(
+                        led.r + (dr as u32 / trans_step) as u8,
+                        led.g + (dg as u32 / trans_step) as u8,
+                        led.b + (db as u32 / trans_step) as u8,
+                    );
+                } else {
+                    *led = to;
+                }
+            }
+        });
+
+        if trans_step > 1 {
+            cx.schedule
+                .transition_leds(
+                    cx.scheduled + TRANSITION_STEP_CYCLES.cycles(),
+                    to,
+                    trans_step - 1,
+                )
+                .unwrap();
+        }
+        cx.spawn.refresh_leds().unwrap();
+    }
+
     #[task(priority = 3, resources = [leds, leds_data])]
     fn refresh_leds(cx: refresh_leds::Context) {
         cx.resources
@@ -860,16 +899,17 @@ const APP: () = {
         cx.spawn.refresh_leds().unwrap();
     }
 
-    #[task(priority = 3, spawn = [set_leds], resources = [rtc, ranges, state, next_or_current_range])]
-    fn handle_event_alarm(cx: handle_event_alarm::Context, _time: NaiveTime) {
+    #[task(priority = 3, spawn = [set_leds, transition_leds], resources = [rtc, ranges, state, next_or_current_range])]
+    fn handle_event_alarm(cx: handle_event_alarm::Context, time: NaiveTime) {
         debug_only! {hprintln!("handle event alarm! {} {}", time.hour(), time.minute()).unwrap()}
 
         let ns = match cx.resources.state {
             FSMState::Idle => None,
             FSMState::WaitNextRange(ref range) => {
                 debug_only! {hprintln!("Enter").unwrap()}
+
                 cx.spawn
-                    .set_leds(0, 1, cx.resources.ranges[*range].in_color)
+                    .transition_leds(cx.resources.ranges[*range].in_color, TRANSITION_STEPS)
                     .unwrap();
 
                 debug_only! {hprintln!("Time: {}, Alarm :{}", time, cx.resources.ranges[*range].end).unwrap()}
@@ -884,7 +924,8 @@ const APP: () = {
             FSMState::InRange(ref range) => {
                 debug_only! {hprintln!("Exit").unwrap()}
 
-                cx.spawn.set_leds(0, 1, colors::GREEN).unwrap();
+                cx.spawn.transition_leds(colors::GREEN, 50).unwrap();
+
                 if *range == cx.resources.ranges.len() - 1 {
                     cx.resources
                         .rtc

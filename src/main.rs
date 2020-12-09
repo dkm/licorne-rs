@@ -8,8 +8,10 @@ extern crate cortex_m_rt;
 
 extern crate nb;
 
+extern crate chrono;
 extern crate cortex_m_semihosting;
 extern crate ds323x;
+
 extern crate embedded_graphics;
 extern crate panic_semihosting;
 extern crate smart_leds;
@@ -338,7 +340,7 @@ const APP: () = {
 
         toggle_switch: ToggleSwitchT,
         rotary_switch: RotarySwitchT,
-        new_time: (u32, u32),
+        new_time: NaiveTime,
 
         rotary: RotaryT,
 
@@ -510,20 +512,41 @@ const APP: () = {
 
         let ranges = [
             TimeRange {
-                start: NaiveTime::from_hms(0, 0, 0),
-                end: NaiveTime::from_hms(5, 0, 0),
+                start: time
+                    .overflowing_add_signed(chrono::Duration::seconds(60 * 1))
+                    .0,
+                end: time
+                    .overflowing_add_signed(chrono::Duration::seconds(60 * 2))
+                    .0,
+
+                // start: NaiveTime::from_hms(0, 0, 0),
+                // end: NaiveTime::from_hms(5, 0, 0),
                 in_color: colors::RED,
                 name: "0:0->5:0",
             },
             TimeRange {
-                start: NaiveTime::from_hms(5, 1, 0),
-                end: NaiveTime::from_hms(7, 0, 0),
+                start: time
+                    .overflowing_add_signed(chrono::Duration::seconds(60 * 3))
+                    .0,
+                end: time
+                    .overflowing_add_signed(chrono::Duration::seconds(60 * 4))
+                    .0,
+
+                // start: NaiveTime::from_hms(5, 1, 0),
+                // end: NaiveTime::from_hms(7, 0, 0),
                 in_color: colors::GREEN,
                 name: "5:1->7:0",
             },
             TimeRange {
-                start: NaiveTime::from_hms(7, 1, 0),
-                end: NaiveTime::from_hms(23, 59, 0),
+                start: time
+                    .overflowing_add_signed(chrono::Duration::seconds(60 * 5))
+                    .0,
+                end: time
+                    .overflowing_add_signed(chrono::Duration::seconds(60 * 6))
+                    .0,
+
+                // start: NaiveTime::from_hms(7, 1, 0),
+                // end: NaiveTime::from_hms(23, 59, 0),
                 in_color: colors::BLUE,
                 name: "7:1->23:59",
             },
@@ -643,7 +666,7 @@ const APP: () = {
             next_or_current_range,
             state,
             rotary,
-            new_time: (0, 0),
+            new_time: NaiveTime::from_hms(0, 0, 0),
 
             i2c_error: 0,
 
@@ -680,24 +703,17 @@ const APP: () = {
                     .rotary
                     .pin_b()
                     .set_interrupt_mode(InterruptMode::Disabled);
-
-                let new_time =
-                    NaiveTime::from_hms(ctx.resources.new_time.0, ctx.resources.new_time.1, 0);
-
+                let copy_new_time = &ctx.resources.new_time;
                 ctx.resources.rtc.lock(|rtc| {
-                    rtc.set_time(&new_time).unwrap();
+                    rtc.set_time(copy_new_time).unwrap();
                 });
             }
             OperatingMode::Configuration(_) => {
-                let new_time = ctx.resources.rtc.lock(|rtc| {
-                    let t = rtc.get_time().unwrap();
-                    (t.hour(), t.minute())
-                });
+                *ctx.resources.new_time = ctx.resources.rtc.lock(|rtc| rtc.get_time().unwrap());
 
                 ctx.resources.display.lock(|display| {
                     draw_config_hint(display, true);
                 });
-                *ctx.resources.new_time = new_time;
 
                 ctx.resources.rotary.pin_a().clear_interrupt();
                 ctx.resources
@@ -1068,36 +1084,47 @@ const APP: () = {
         });
 
         cx.spawn.refresh_epd().unwrap();
-        debug_only! {hprintln!("refresh time with: {} {}", time.hour(), time.minute()).unwrap()}
     }
 
     #[task(priority = 1, spawn = [refresh_time, rotate_leds], resources =[rtc, new_time, mode])]
     fn knob_turned(cx: knob_turned::Context, dir: Direction) {
-        let next_time = cx.resources.new_time;
-
         match dir {
             Direction::Clockwise => {
                 cx.spawn.rotate_leds(true, 1).unwrap();
                 if *cx.resources.mode == OperatingMode::Configuration(SubConfig::Hour) {
-                    next_time.0 += 1;
+                    *cx.resources.new_time = cx
+                        .resources
+                        .new_time
+                        .overflowing_add_signed(chrono::Duration::hours(1))
+                        .0;
                 } else {
-                    next_time.1 += 1;
+                    *cx.resources.new_time = cx
+                        .resources
+                        .new_time
+                        .overflowing_add_signed(chrono::Duration::minutes(1))
+                        .0;
                 }
             }
             Direction::CounterClockwise => {
                 cx.spawn.rotate_leds(false, 1).unwrap();
                 if *cx.resources.mode == OperatingMode::Configuration(SubConfig::Hour) {
-                    next_time.0 -= 1;
+                    *cx.resources.new_time = cx
+                        .resources
+                        .new_time
+                        .overflowing_add_signed(chrono::Duration::hours(-1))
+                        .0;
                 } else {
-                    next_time.1 -= 1;
+                    *cx.resources.new_time = cx
+                        .resources
+                        .new_time
+                        .overflowing_add_signed(chrono::Duration::minutes(-1))
+                        .0;
                 }
             }
             _ => (),
         }
 
-        cx.spawn
-            .refresh_time(NaiveTime::from_hms(next_time.0, next_time.1, 0))
-            .unwrap();
+        cx.spawn.refresh_time(*cx.resources.new_time).unwrap();
     }
 
     #[task(binds = GPIOB, resources = [rotary, mode, toggle_switch, rotary_switch], spawn = [ knob_turned, poll_toggle_switch, poll_rotary_switch ])]

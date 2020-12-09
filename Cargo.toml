@@ -34,6 +34,8 @@ tm4c-hal = { git = "https://github.com/dkm/tm4c-hal" }
 tm4c123x-hal = { git = "https://github.com/dkm/tm4c-hal", features = ["rt"] }
 
 ds323x = "0.3"
+chrono = { version = "0.4", default-features = false }
+
 nb = "0.1"
 cortex-m = "0.6"
 

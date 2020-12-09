@@ -50,7 +50,7 @@ embedded-graphics = "0.6"
 cortex-m-rtic = "0.5"
 bme680 = { version = "0.5", optional = true }
 
-drogue-bme680 = { version = "0.3", optional = true }
+drogue-bme680 = { optional = true, git = "https://github.com/dkm/drogue-bme680.git", branch = "main" }
 embedded-time = { version = "0.10", optional = true }
 
 [dependencies.heapless]

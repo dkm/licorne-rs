@@ -1053,6 +1053,7 @@ const APP: () = {
             _gas = 0i32;
             *cx.resources.i2c_error += 1;
             debug_only! {hprintln!("I2C error drogue_bme680 for bme").unwrap()}
+            cx.resources.bme680.soft_reinit().unwrap();
         }
 
         let cur_i2c_error = *cx.resources.i2c_error;

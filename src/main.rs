@@ -31,20 +31,18 @@ use rtic::cyccnt::U32Ext as _;
 #[cfg(not(feature = "usedrogue"))]
 use bme680::{Bme680, I2CAddress, IIRFilterSize, OversamplingSetting, PowerMode, SettingsBuilder};
 
-#[cfg(feature = "usedrogue")]
-use drogue_bme680::{
-    Address, Bme680Controller, Bme680Sensor, Configuration, DelayMsWrapper, StaticProvider,
-};
-#[cfg(feature = "usedrogue")]
-use embedded_time::duration::Milliseconds;
-
+#[cfg(not(feature = "usedrogue"))]
 use core::time::Duration;
+
+#[cfg(feature = "usedrogue")]
+use drogue_bme680::{Address, Bme680Controller, Bme680Sensor, Configuration, StaticProvider};
 
 use embedded_hal::{
     blocking::delay::{DelayMs, DelayUs},
     digital::v2::InputPin,
 };
 
+#[cfg(feature = "usesemihosting")]
 use cortex_m_semihosting::hprintln;
 
 use debouncr::{debounce_stateful_12, DebouncerStateful, Edge, Repeat12};
@@ -83,7 +81,7 @@ macro_rules! debug_only {
     ($code:block) => {};
 }
 
-const NUM_LEDS: usize = 8;
+const NUM_LEDS: usize = 3;
 
 const FONT_TIME: embedded_various_fonts::fonts::GNUTypeWriter60Point =
     embedded_various_fonts::fonts::GNUTypeWriter60Point {};
@@ -149,16 +147,16 @@ impl DelayUs<u8> for SimpleAsmDelay {
         self.delay_us(cast::u32(us))
     }
 }
-// PA2: SSI0
-// PA4: SSI0
-// PA5: SSI0
-// PA6: I2C1 (scl)
-// PA7: I2C1 (sca)
+// PA2: SSI0 [epd]
+// PA4: SSI0 [epd unconnected]
+// PA5: SSI0 [epd]
+// PA6: I2C1 (scl) [bme680]
+// PA7: I2C1 (sca) [bme680]
 //
 // PB0: EPD
 // PB1: Rotary Encoder (pinA)
-// PB2: I2C0 (SCL)
-// PB3: I2C0 (SDA)
+// PB2: I2C0 (SCL) [rtc]
+// PB3: I2C0 (SDA) [rtc]
 // PB4: Rotary Encoder (pinB)
 // PB5: Toggle Switch (config mode)
 // PB6:
@@ -166,10 +164,10 @@ impl DelayUs<u8> for SimpleAsmDelay {
 //
 // PC6: EPD
 //
-// PD0: SSI1
+// PD0: SSI1 [WS2812 unconnected]
 // PD1: EPD
-// PD2: SSI1
-// PD3: SSI1
+// PD2: SSI1 [WS2812 unconnected]
+// PD3: SSI1 [WS2812 DIN]
 // PD6: RTC / INT
 //
 // PE4: EPD
@@ -217,9 +215,9 @@ type I2c1T = I2c<
 type Bme680T = Bme680<I2c1T, SimpleAsmDelay>;
 
 #[cfg(feature = "usedrogue")]
-type Bme680T =  Bme680Controller<I2c1T, SimpleAsmDelay, StaticProvider>;
+type Bme680T = Bme680Controller<I2c1T, SimpleAsmDelay, StaticProvider>;
 
-// spi for WS2812
+// spi for EPD
 type Spi0T = Spi<
     SSI0,
     (
@@ -229,7 +227,7 @@ type Spi0T = Spi<
     ),
 >;
 
-// spi for E-ink screen
+// spi for WS2812 screen
 type Spi1T = Spi<
     SSI1,
     (
@@ -396,7 +394,7 @@ const APP: () = {
             (
                 porta.pa2.into_af_push_pull::<AF2>(&mut porta.control), // SCK
                 porta.pa4.into_af_push_pull::<AF2>(&mut porta.control), // Miso
-                porta.pa5.into_af_pull_down::<AF2>(&mut porta.control),
+                porta.pa5.into_af_pull_down::<AF2>(&mut porta.control), // Mosi
             ), // Mosi
             MODE_0,
             2_000_000.hz(),
@@ -447,9 +445,13 @@ const APP: () = {
         let bme680_sensor = Bme680Sensor::from(i2c_bme680, Address::Primary).unwrap();
 
         #[cfg(feature = "usedrogue")]
-        let mut bme680 =
-            Bme680Controller::new(bme680_sensor, SimpleAsmDelay { freq: 80_000_000 }, Configuration::standard(), StaticProvider(25))
-            .unwrap();
+        let bme680 = Bme680Controller::new(
+            bme680_sensor,
+            SimpleAsmDelay { freq: 80_000_000 },
+            Configuration::standard(),
+            StaticProvider(25),
+        )
+        .unwrap();
 
         let mut delay = SimpleAsmDelay { freq: 80_000_000 };
         let mut epd =
@@ -465,7 +467,7 @@ const APP: () = {
             (
                 portd.pd0.into_af_push_pull::<AF2>(&mut portd.control), // SCK
                 portd.pd2.into_af_push_pull::<AF2>(&mut portd.control), // Miso
-                portd.pd3.into_af_pull_down::<AF2>(&mut portd.control),
+                portd.pd3.into_af_pull_down::<AF2>(&mut portd.control), // Mosi (connected)
             ), // Mosi
             ws2812::MODE,
             3_000_000.hz(),
@@ -556,7 +558,16 @@ const APP: () = {
         let mut found = false;
         let mut next_or_current_range = 0;
 
-        for (i, range) in ranges.iter().rev().enumerate() {
+        for (i, range) in ranges.iter().enumerate() {
+            next_or_current_range = i;
+
+            debug_only! {
+                hprintln!(
+                    "Testing range #{}",
+                    i
+                ).unwrap()
+            }
+
             if time < range.start {
                 state = FSMState::WaitNextRange(i);
                 debug_only! {
@@ -588,7 +599,6 @@ const APP: () = {
                 found = true;
                 break;
             }
-            next_or_current_range += 1;
         }
 
         if !found {
@@ -609,7 +619,6 @@ const APP: () = {
         // enable partial refresh from now on
         epd.set_refresh(&mut spi0, &mut delay, RefreshLUT::QUICK)
             .unwrap();
-
 
         let rotary_pin = portb.pb7.into_pull_up_input();
         let init_state = rotary_pin.is_high().unwrap();
@@ -688,9 +697,11 @@ const APP: () = {
 
         *ctx.resources.mode = mode;
 
-        match *ctx.resources.mode { OperatingMode::Normal => {
-            ctx.resources.display.lock(|mut display| { draw_config_hint(&mut
-            display, false); });
+        match *ctx.resources.mode {
+            OperatingMode::Normal => {
+                ctx.resources.display.lock(|mut display| {
+                    draw_config_hint(&mut display, false);
+                });
 
                 ctx.resources.rotary.pin_a().clear_interrupt();
                 ctx.resources
@@ -906,13 +917,12 @@ const APP: () = {
             &errcnt_s,
             Point::new(SCR_RIGHT_BAR_ERRCNT_X_OFF, SCR_RIGHT_BAR_ERRCNT_Y_OFF + 16),
         )
-            .into_styled(text_style!(
-                font = FONT_RIGHT_BAR,
-                text_color = Black,
-                background_color = White
-            ))
-            .draw(cx.resources.display);
-
+        .into_styled(text_style!(
+            font = FONT_RIGHT_BAR,
+            text_color = Black,
+            background_color = White
+        ))
+        .draw(cx.resources.display);
 
         if do_full_refresh {
             cx.resources.screen.quick_refresh_count = 0;
@@ -973,10 +983,14 @@ const APP: () = {
         }
 
         #[cfg(feature = "usedrogue")]
-        if let Ok(opt_data) = cx.resources.bme680.measure(5, Milliseconds(50)) {
+        if let Ok(opt_data) = cx.resources.bme680.measure_default() {
             if let Some(data) = opt_data {
                 temp = data.temperature as i32;
-                _pres = if let Some(f) = data.pressure {f as i32 } else { 0 };
+                _pres = if let Some(f) = data.pressure {
+                    f as i32
+                } else {
+                    0
+                };
                 humid = data.humidity as i32;
                 _gas = data.gas_resistance as i32;
             } else {
@@ -987,7 +1001,6 @@ const APP: () = {
                 *cx.resources.i2c_error += 1;
                 debug_only! {hprintln!("I2C OK, but empty result from drogue_bme680").unwrap()}
             }
-
         } else {
             // For some reason, the bme680 seems to stop responding and a hw
             // reset is needed to make it work again. Maybe caused by the
@@ -1073,6 +1086,8 @@ const APP: () = {
                 time.minute()
             )
             .unwrap();
+
+            debug_only! {hprintln!("refresh time with: {}", hhmm).unwrap()}
 
             let _ = Text::new(&hhmm, Point::new(SCR_HOUR_X_OFF as i32, SCR_HOUR_Y_OFF))
                 .into_styled(text_style!(

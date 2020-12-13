@@ -290,7 +290,7 @@ where
 {
     pin: P,
     debouncer: DebouncerStateful<u16, Repeat12>,
-    sample_count: u8,
+    sample_count: i8,
 }
 
 impl<P> Switch<P>
@@ -301,7 +301,7 @@ where
         Switch {
             pin,
             debouncer: debounce_stateful_12(state),
-            sample_count: 0,
+            sample_count: -1,
         }
     }
 }
@@ -320,7 +320,8 @@ const TRANSITION_STEP_CYCLES: u32 = (1000 / TRANSITION_STEPS) * ONE_MS;
 
 // At 80Mhz, this is ~1ms
 const POLL_SWITCH_PERIOD: u32 = 1 * ONE_MS;
-const DEBOUNCE_SAMPLE_CNT: u8 = 12;
+const DEBOUNCE_SAMPLE_CNT: i8 = 20;
+const ROTARY_SAMPLING_PERIOD: u32 = 1 * ONE_MS;
 
 #[rtic::app(device = tm4c123x_hal::pac, peripherals = true, monotonic = rtic::cyccnt::CYCCNT)]
 const APP: () = {
@@ -579,7 +580,7 @@ const APP: () = {
                 state = FSMState::WaitNextRange(i);
                 debug_only! {
                     hprintln!(
-                        "Waiting for next range to activate: {}:{}",
+                        "Waiting for next range to activate: {} -> {}",
                         range.start,
                         range.end
                     ).unwrap()
@@ -627,13 +628,11 @@ const APP: () = {
         let rotary_pin = portb.pb7.into_pull_up_input();
         let init_state = rotary_pin.is_high().unwrap();
         let mut rotary_switch = RotarySwitchT::new(rotary_pin, init_state);
-        rotary_switch
-            .pin
-            .set_interrupt_mode(InterruptMode::EdgeBoth);
-        rotary_switch.pin.clear_interrupt();
 
         // switch is using PUR, is_low() <=> pressed <=> 'true' state
-        let mut toggle_switch = ToggleSwitchT::new(portb.pb5.into_pull_up_input(), false);
+        let toggle_pin = portb.pb5.into_pull_up_input();
+        let toggle_init_state = toggle_pin.is_high().unwrap();
+        let mut toggle_switch = ToggleSwitchT::new(toggle_pin, toggle_init_state);
         toggle_switch
             .pin
             .set_interrupt_mode(InterruptMode::EdgeBoth);
@@ -690,34 +689,44 @@ const APP: () = {
 
     #[task(
         priority = 1,
-        resources = [mode, rotary, display, new_time, rtc],
-        spawn = [refresh_epd]
+        resources = [mode, rotary, rotary_switch, display, new_time, rtc, rtc_int_pin],
+        spawn = [refresh_epd, rotary_sampling]
     )]
     fn change_mode(mut ctx: change_mode::Context, mode: OperatingMode) {
-        debug_only! {hprintln!("change mode from {:?} to {:?}", *ctx.resources.mode, mode).unwrap()}
-        if *ctx.resources.mode == mode {
+        let must_continue = ctx.resources.mode.lock(|current_mode| {
+            let prev_mode = *current_mode;
+            *current_mode = mode;
+
+            if !(prev_mode == OperatingMode::Normal) ^ (mode == OperatingMode::Normal) {
+                debug_only! {hprintln!("ret").unwrap()}
+                false
+            } else {
+                true
+            }
+        });
+
+        if !must_continue {
             return;
         }
 
-        *ctx.resources.mode = mode;
-
-        match *ctx.resources.mode {
+        match mode {
             OperatingMode::Normal => {
                 ctx.resources.display.lock(|mut display| {
                     draw_config_hint(&mut display, false);
                 });
 
-                ctx.resources.rotary.pin_a().clear_interrupt();
+                // Monitor alarms from RTC
+                ctx.resources.rtc_int_pin.clear_interrupt();
                 ctx.resources
-                    .rotary
-                    .pin_a()
-                    .set_interrupt_mode(InterruptMode::Disabled);
-                ctx.resources.rotary.pin_b().clear_interrupt();
+                    .rtc_int_pin
+                    .set_interrupt_mode(InterruptMode::EdgeFalling);
 
+                // Disable anything comming from rotary switch
                 ctx.resources
-                    .rotary
-                    .pin_b()
+                    .rotary_switch
+                    .pin
                     .set_interrupt_mode(InterruptMode::Disabled);
+
                 let copy_new_time = &ctx.resources.new_time;
                 ctx.resources.rtc.lock(|rtc| {
                     rtc.set_time(copy_new_time).unwrap();
@@ -729,16 +738,18 @@ const APP: () = {
                 ctx.resources.display.lock(|display| {
                     draw_config_hint(display, true);
                 });
+                ctx.spawn.rotary_sampling(true).unwrap();
 
-                ctx.resources.rotary.pin_a().clear_interrupt();
+                // Do not monitor alarms from RTC
                 ctx.resources
-                    .rotary
-                    .pin_a()
-                    .set_interrupt_mode(InterruptMode::EdgeBoth);
-                ctx.resources.rotary.pin_b().clear_interrupt();
+                    .rtc_int_pin
+                    .set_interrupt_mode(InterruptMode::Disabled);
+
+                // Enable Rotary switch monitoring
+                ctx.resources.rotary_switch.pin.clear_interrupt();
                 ctx.resources
-                    .rotary
-                    .pin_b()
+                    .rotary_switch
+                    .pin
                     .set_interrupt_mode(InterruptMode::EdgeBoth);
             }
         }
@@ -746,6 +757,7 @@ const APP: () = {
     }
 
     #[task(
+        priority = 3,
         resources = [mode, toggle_switch],
         schedule = [poll_toggle_switch],
         spawn = [change_mode]
@@ -756,84 +768,34 @@ const APP: () = {
 
         // Update state
         let edge = ctx.resources.toggle_switch.debouncer.update(pressed);
-        ctx.resources.toggle_switch.sample_count += 1;
+        ctx.resources.toggle_switch.sample_count -= 1;
 
         // Dispatch event
         if edge == Some(Edge::Rising) {
-            ctx.resources.toggle_switch.sample_count = 0;
+            ctx.resources.toggle_switch.sample_count = -1;
             ctx.spawn
                 .change_mode(OperatingMode::Configuration(SubConfig::Hour))
                 .unwrap();
         } else if edge == Some(Edge::Falling) {
-            ctx.resources.toggle_switch.sample_count = 0;
+            ctx.resources.toggle_switch.sample_count = -1;
             ctx.spawn.change_mode(OperatingMode::Normal).unwrap();
-        } else if ctx.resources.toggle_switch.sample_count <= DEBOUNCE_SAMPLE_CNT {
+        } else if ctx.resources.toggle_switch.sample_count > 0 {
             // Re-schedule the timer interrupt to get enough samples
             ctx.schedule
                 .poll_toggle_switch(ctx.scheduled + POLL_SWITCH_PERIOD.cycles())
                 .unwrap();
         } else {
-            debug_only! {hprintln!("nothing ? {:?} {:?}", pressed, ctx.resources.toggle_switch.pin.is_high()).unwrap()}
+            debug_only! {hprintln!("nothing ? {:?} {:?}", pressed, ctx.resources.toggle_switch.pin.is_high().unwrap()).unwrap()}
 
             debug_only! {
                 hprintln!("mode is {:?}, switch is {:?} debouncer is {:?}",
                           ctx.resources.mode,
-                          ctx.resources.toggle_switch.pin.is_high(),
+                          ctx.resources.toggle_switch.pin.is_high().unwrap(),
                           ctx.resources.toggle_switch.debouncer.is_high())
                     .unwrap()
             }
 
-            ctx.resources.toggle_switch.sample_count = 0;
-        }
-    }
-
-    #[task(
-        resources = [mode, rotary_switch],
-        schedule = [poll_rotary_switch],
-        spawn = [change_mode]
-    )]
-    fn poll_rotary_switch(ctx: poll_rotary_switch::Context) {
-        // Poll button
-        let pressed: bool = ctx.resources.rotary_switch.pin.is_low().unwrap();
-
-        // Update state
-        let edge = ctx.resources.rotary_switch.debouncer.update(pressed);
-        ctx.resources.rotary_switch.sample_count += 1;
-
-        // Dispatch event
-        if edge == Some(Edge::Rising) {
-            debug_only! {hprintln!("rotary PRESSED").unwrap()}
-            ctx.resources.rotary_switch.sample_count = 0;
-            *ctx.resources.mode = match ctx.resources.mode {
-                OperatingMode::Normal => OperatingMode::Normal,
-                OperatingMode::Configuration(SubConfig::Hour) => {
-                    OperatingMode::Configuration(SubConfig::Minute)
-                }
-                OperatingMode::Configuration(SubConfig::Minute) => {
-                    OperatingMode::Configuration(SubConfig::Hour)
-                }
-            };
-        //            ctx.spawn.change_mode(OperatingMode::Configuration);
-        } else if edge == Some(Edge::Falling) {
-            debug_only! {hprintln!("rotary RELEASED").unwrap()}
-            ctx.resources.rotary_switch.sample_count = 0;
-        //            ctx.spawn.change_mode(OperatingMode::Normal);
-        } else if ctx.resources.rotary_switch.sample_count <= DEBOUNCE_SAMPLE_CNT {
-            // Re-schedule the timer interrupt to get enough samples
-            ctx.schedule
-                .poll_rotary_switch(ctx.scheduled + POLL_SWITCH_PERIOD.cycles())
-                .unwrap();
-        } else {
-            debug_only! {hprintln!("rotary nothing ? {:?} {:?}", pressed, ctx.resources.rotary_switch.pin.is_high()).unwrap()}
-
-            debug_only! {
-                hprintln!("rotary switch is {:?} debouncer is {:?}",
-                          ctx.resources.rotary_switch.pin.is_high(),
-                          ctx.resources.rotary_switch.debouncer.is_high())
-                    .unwrap()
-            }
-
-            ctx.resources.rotary_switch.sample_count = 0;
+            ctx.resources.toggle_switch.sample_count = -1;
         }
     }
 
@@ -1144,12 +1106,70 @@ const APP: () = {
         cx.spawn.refresh_epd().unwrap();
     }
 
+    #[task(priority = 1,
+           schedule = [rotary_sampling],
+           spawn = [knob_turned, change_mode],
+           resources =[mode, rotary, rotary_switch])]
+    fn rotary_sampling(mut cx: rotary_sampling::Context, first: bool) {
+        if first {
+            debug_only! {hprintln!("rotary sampling").unwrap()}
+        }
+
+        let current_mode = cx.resources.mode.lock(|m| *m);
+
+        match current_mode {
+            OperatingMode::Normal => {
+                debug_only! {hprintln!("Stopping rotary sampling").unwrap()}
+            }
+
+            OperatingMode::Configuration(_) => {
+                // Refresh Rotary encoder and maybe spawn handler
+                let dir = cx.resources.rotary.update().unwrap();
+                match dir {
+                    Direction::Clockwise | Direction::CounterClockwise => {
+                        cx.spawn.knob_turned(dir).unwrap();
+                    }
+                    Direction::None => {}
+                }
+
+                // Refresh switch and maybe spawn handler
+                let pressed: bool = cx.resources.rotary_switch.pin.is_low().unwrap();
+                let edge = cx.resources.rotary_switch.debouncer.update(pressed);
+
+                // Dispatch event
+                if edge == Some(Edge::Rising) {
+                    debug_only! {hprintln!("rotary PRESSED").unwrap()}
+                } else if edge == Some(Edge::Falling) {
+                    debug_only! {hprintln!("rotary RELEASED").unwrap()}
+                    let new_mode = match current_mode {
+                        OperatingMode::Normal => OperatingMode::Normal,
+                        OperatingMode::Configuration(SubConfig::Hour) => {
+                            OperatingMode::Configuration(SubConfig::Minute)
+                        }
+                        OperatingMode::Configuration(SubConfig::Minute) => {
+                            OperatingMode::Configuration(SubConfig::Hour)
+                        }
+                    };
+
+                    cx.spawn.change_mode(new_mode).unwrap();
+                }
+
+                // Continue sampling
+                cx.schedule
+                    .rotary_sampling(cx.scheduled + ROTARY_SAMPLING_PERIOD.cycles(), false)
+                    .unwrap();
+            }
+        }
+    }
+
     #[task(priority = 1, spawn = [refresh_time, rotate_leds], resources =[rtc, new_time, mode])]
-    fn knob_turned(cx: knob_turned::Context, dir: Direction) {
+    fn knob_turned(mut cx: knob_turned::Context, dir: Direction) {
+        let current_mode = cx.resources.mode.lock(|m| *m);
+        debug_only! {hprintln!("knob turned {:?} {:?}", dir, current_mode).unwrap()}
         match dir {
             Direction::Clockwise => {
                 cx.spawn.rotate_leds(true, 1).unwrap();
-                if *cx.resources.mode == OperatingMode::Configuration(SubConfig::Hour) {
+                if current_mode == OperatingMode::Configuration(SubConfig::Hour) {
                     *cx.resources.new_time = cx
                         .resources
                         .new_time
@@ -1165,7 +1185,7 @@ const APP: () = {
             }
             Direction::CounterClockwise => {
                 cx.spawn.rotate_leds(false, 1).unwrap();
-                if *cx.resources.mode == OperatingMode::Configuration(SubConfig::Hour) {
+                if current_mode == OperatingMode::Configuration(SubConfig::Hour) {
                     *cx.resources.new_time = cx
                         .resources
                         .new_time
@@ -1185,44 +1205,24 @@ const APP: () = {
         cx.spawn.refresh_time(*cx.resources.new_time).unwrap();
     }
 
-    #[task(binds = GPIOB, resources = [rotary, mode, toggle_switch, rotary_switch], spawn = [ knob_turned, poll_toggle_switch, poll_rotary_switch ])]
-    fn gpiob_rotary_switch(cx: gpiob_rotary_switch::Context) {
-        // whatever happens, clear these ITs.
-        cx.resources.rotary.pin_a().clear_interrupt();
-        cx.resources.rotary.pin_b().clear_interrupt();
+    #[task(binds = GPIOB, resources = [toggle_switch], spawn = [ poll_toggle_switch ])]
+    fn gpiob(mut cx: gpiob::Context) {
+        let need_spawn = cx.resources.toggle_switch.lock(|ts| {
+            if ts.pin.get_interrupt_status() {
+                debug_only! {hprintln!("toggle switch IT raised, starting debouncing sampling!").unwrap()}
+                ts.pin.clear_interrupt();
 
-        if cx.resources.toggle_switch.pin.get_interrupt_status() {
-            debug_only! {hprintln!("toggle switch IT raised, starting debouncing sampling!").unwrap()}
-            cx.resources.toggle_switch.pin.clear_interrupt();
-
-            // debug_only! {
-            //     hprintln!("mode is {:?}, tog switch is {:?} debouncer is {:?}",
-            //               cx.resources.mode,
-            //               cx.resources.toggle_switch.pin.is_high(),
-            //               cx.resources.toggle_switch.debouncer.is_high())
-            //         .unwrap()
-            // }
-
-            cx.spawn.poll_toggle_switch().unwrap();
-        }
-
-        if cx.resources.rotary_switch.pin.get_interrupt_status() {
-            cx.resources.rotary_switch.pin.clear_interrupt();
-            cx.spawn.poll_rotary_switch().unwrap();
-        }
-
-        match *cx.resources.mode {
-            OperatingMode::Normal => (),
-
-            OperatingMode::Configuration(_) => {
-                let dir = cx.resources.rotary.update().unwrap();
-                match dir {
-                    Direction::Clockwise | Direction::CounterClockwise => {
-                        cx.spawn.knob_turned(dir).unwrap();
-                    }
-                    Direction::None => {}
+                if ts.sample_count == -1 {
+                    debug_only! {hprintln!("Starting toggle switch sampling").unwrap()}
+                    ts.sample_count = DEBOUNCE_SAMPLE_CNT;
+                    return true;
                 }
             }
+            false
+        });
+
+        if need_spawn {
+            cx.spawn.poll_toggle_switch().unwrap();
         }
     }
 
@@ -1246,7 +1246,12 @@ const APP: () = {
         if a1 {
             cx.spawn.handle_event_alarm(time).unwrap();
         }
-        if a2 && *cx.resources.mode == OperatingMode::Normal {
+
+        if cx
+            .resources
+            .mode
+            .lock(|mode| a2 && *mode == OperatingMode::Normal)
+        {
             cx.spawn.refresh_bme680().unwrap();
             cx.spawn.refresh_time(time).unwrap();
         }

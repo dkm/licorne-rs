@@ -153,7 +153,7 @@ impl DelayUs<u8> for SimpleAsmDelay {
 // PA6: I2C1 (scl) [bme680]
 // PA7: I2C1 (sca) [bme680]
 //
-// PB0: EPD
+//
 // PB1: Rotary Encoder (pinA)
 // PB2: I2C0 (SCL) [rtc]
 // PB3: I2C0 (SDA) [rtc]
@@ -162,22 +162,23 @@ impl DelayUs<u8> for SimpleAsmDelay {
 // PB6:
 // PB7: Rotary switch
 //
-// PC6: EPD
+// PC6: GPIO [EPD-cs]
 //
 // PD0: SSI1 [WS2812 unconnected]
-// PD1: EPD
+// PD1: [EPD-reset]
 // PD2: SSI1 [WS2812 unconnected]
 // PD3: SSI1 [WS2812 DIN]
 // PD6: RTC / INT
 //
-// PE4: EPD
+// PE2: GPIO Floating [EPD-busy]
+// PE4: [EPD-dc]
 
 use tm4c123x_hal::{
     gpio::gpioa::{PA2, PA4, PA5, PA6, PA7},
-    gpio::gpiob::{PB0, PB1, PB2, PB3, PB4, PB5, PB7},
+    gpio::gpiob::{PB1, PB2, PB3, PB4, PB5, PB7},
     gpio::gpioc::PC6,
     gpio::gpiod::{PD0, PD1, PD2, PD3, PD6},
-    gpio::gpioe::PE4,
+    gpio::gpioe::{PE2, PE4},
     gpio::{
         AlternateFunction, Floating, GpioExt, Input, InterruptMode, OpenDrain, Output, PullDown,
         PullUp, PushPull, AF2, AF3,
@@ -240,7 +241,7 @@ type Spi1T = Spi<
 type EpdT = EPD2in13<
     Spi0T,
     PC6<Output<PushPull>>,
-    PB0<Input<Floating>>,
+    PE2<Input<Floating>>,
     PE4<Output<PushPull>>,
     PD1<Output<PushPull>>,
 >;
@@ -410,7 +411,7 @@ const APP: () = {
         let cs_pin = portc.pc6.into_push_pull_output(); // cs
         let rst_pin = portd.pd1.into_push_pull_output();
         let dc_pin = porte.pe4.into_push_pull_output(); // dc
-        let busy_pin = portb.pb0.into_floating_input();
+        let busy_pin = porte.pe2.into_floating_input();
 
         // Cortex-M peripherals
         // : cortex_m::Peripherals

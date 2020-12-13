@@ -275,7 +275,7 @@ pub enum OperatingMode {
     Configuration(SubConfig),
 }
 
-const MAX_NUM_QUICK_REFRESH: u32 = 10;
+const MAX_NUM_QUICK_REFRESH: u32 = 0;
 
 pub struct Screen {
     epd: EpdT,

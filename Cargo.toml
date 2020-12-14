@@ -47,7 +47,9 @@ smart-leds = "0.3"
 ## Waiting for next release with 2in13 support
 epd-waveshare = {git = "https://github.com/caemor/epd-waveshare.git", rev="87e63741ef9335439d97f587a781630077be2515" }
 embedded-graphics = "0.6"
-cortex-m-rtic = "0.5"
+cortex-m-rtic = "0.6.0-alpha.0"
+rtic-core = "0.3"
+
 bme680 = { version = "0.5", optional = true }
 
 drogue-bme680 = { optional = true, git = "https://github.com/dkm/drogue-bme680.git", branch = "main" }

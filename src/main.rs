@@ -22,64 +22,17 @@ extern crate ws2812_spi;
 #[cfg(feature = "usedrogue")]
 extern crate embedded_time;
 
-use heapless::{consts::U5, String};
-
-use ufmt::uwrite;
-
-use rtic::cyccnt::U32Ext as _;
-
-#[cfg(not(feature = "usedrogue"))]
-use bme680::{Bme680, I2CAddress, IIRFilterSize, OversamplingSetting, PowerMode, SettingsBuilder};
-
-#[cfg(not(feature = "usedrogue"))]
-use core::time::Duration;
-
-#[cfg(feature = "usedrogue")]
-use drogue_bme680::{Address, Bme680Controller, Bme680Sensor, Configuration, StaticProvider};
-
 use embedded_hal::{
     blocking::delay::{DelayMs, DelayUs},
     digital::v2::InputPin,
 };
-
-#[cfg(feature = "usesemihosting")]
-use cortex_m_semihosting::hprintln;
-
-use debouncr::{debounce_stateful_12, DebouncerStateful, Edge, Repeat12};
 
 use embedded_graphics::{
     fonts::Text, pixelcolor::BinaryColor::Off as White, pixelcolor::BinaryColor::On as Black,
     prelude::*, text_style,
 };
 
-use cortex_m::peripheral::DWT;
-use epd_waveshare::{
-    epd2in13_v2::{Display2in13, EPD2in13},
-    graphics::{Display, DisplayRotation},
-    prelude::*,
-};
-
-use ds323x::{Alarm2Matching, DayAlarm2, Ds323x, Hours, NaiveTime, Rtcc, Timelike};
-
-use smart_leds::{colors, SmartLedsWrite, RGB8};
-
-use ws2812_spi as ws2812;
-
-#[cfg(feature = "usesemihosting")]
-macro_rules! debug_only {
-    ($statement:stmt) => {
-        $statement
-    };
-    ($code:block) => {
-        $code
-    };
-}
-
-#[cfg(not(feature = "usesemihosting"))]
-macro_rules! debug_only {
-    ($statement:stmt) => {};
-    ($code:block) => {};
-}
+use epd_waveshare::epd2in13_v2::{Display2in13, EPD2in13};
 
 const NUM_LEDS: usize = 3;
 
@@ -173,24 +126,28 @@ impl DelayUs<u8> for SimpleAsmDelay {
 // PE2: GPIO Floating [EPD-busy]
 // PE4: [EPD-dc]
 
+use ds323x::{Ds323x, NaiveTime};
 use tm4c123x_hal::{
     gpio::gpioa::{PA2, PA4, PA5, PA6, PA7},
     gpio::gpiob::{PB1, PB2, PB3, PB4, PB5, PB7},
     gpio::gpioc::PC6,
-    gpio::gpiod::{PD0, PD1, PD2, PD3, PD6},
+    gpio::gpiod::{PD0, PD1, PD2, PD3},
     gpio::gpioe::{PE2, PE4},
     gpio::{
-        AlternateFunction, Floating, GpioExt, Input, InterruptMode, OpenDrain, Output, PullDown,
-        PullUp, PushPull, AF2, AF3,
+        AlternateFunction, Floating, Input, OpenDrain, Output, PullDown, PullUp, PushPull, AF2, AF3,
     },
     i2c::I2c,
-    spi::{Spi, MODE_0},
-    sysctl::{self, SysctlExt},
-    time::U32Ext,
+    spi::Spi,
     tm4c123x::{I2C0, I2C1, SSI0, SSI1},
 };
 
-use rotary_encoder_hal::{Direction, Rotary};
+#[cfg(feature = "usedrogue")]
+use drogue_bme680::{Bme680Controller, StaticProvider};
+
+use debouncr::{debounce_stateful_12, DebouncerStateful, Repeat12};
+use smart_leds::RGB8;
+
+use rotary_encoder_hal::Rotary;
 // Specialized types for our particular setup.
 
 // i2c for DS3231 RTC
@@ -238,7 +195,7 @@ type Spi1T = Spi<
     ),
 >;
 
-type EpdT = EPD2in13<
+pub type EpdT = EPD2in13<
     Spi0T,
     PC6<Output<PushPull>>,
     PE2<Input<Floating>>,
@@ -312,19 +269,100 @@ type ToggleSwitchT = Switch<ToggleSwitchPinT>;
 type RotarySwitchPinT = PB7<Input<PullUp>>;
 type RotarySwitchT = Switch<RotarySwitchPinT>;
 
-// Runnig at 80Mhz
-const ONE_MS: u32 = 80_000;
+#[rtic::app(device = tm4c123x_hal::pac, peripherals = true, monotonic = rtic::cyccnt::CYCCNT, dispatchers = [UART1, UART2, UART3, UART4])]
+mod app {
+    extern crate rtic_core;
 
-const TRANSITION_STEPS: u32 = 50;
-const TRANSITION_STEP_CYCLES: u32 = (1000 / TRANSITION_STEPS) * ONE_MS;
+    use rtic_core::prelude::*;
 
-// At 80Mhz, this is ~1ms
-const POLL_SWITCH_PERIOD: u32 = 1 * ONE_MS;
-const DEBOUNCE_SAMPLE_CNT: i8 = 20;
-const ROTARY_SAMPLING_PERIOD: u32 = 1 * ONE_MS;
+    use crate::{
+        draw_config_hint, Bme680T, FSMState, OperatingMode, RotarySwitchT, RotaryT, RtcT, Screen,
+        SimpleAsmDelay, Spi1T, SubConfig, TimeRange, ToggleSwitchT, FONT_RIGHT_BAR, FONT_TIME,
+        MAX_NUM_QUICK_REFRESH, NUM_LEDS, SCR_HOUR_X_OFF, SCR_HOUR_Y_OFF,
+        SCR_RIGHT_BAR_ERRCNT_X_OFF, SCR_RIGHT_BAR_ERRCNT_Y_OFF, SCR_RIGHT_BAR_HUMID_X_OFF,
+        SCR_RIGHT_BAR_HUMID_Y_OFF, SCR_RIGHT_BAR_TEMP_X_OFF, SCR_RIGHT_BAR_TEMP_Y_OFF,
+    };
 
-#[rtic::app(device = tm4c123x_hal::pac, peripherals = true, monotonic = rtic::cyccnt::CYCCNT)]
-const APP: () = {
+    use tm4c123x_hal::{
+        gpio::{gpiod::PD6, Floating, GpioExt, Input, InterruptMode, PullUp, AF2, AF3},
+        i2c::I2c,
+        spi::{Spi, MODE_0},
+        sysctl::{self, SysctlExt},
+        time::U32Ext,
+    };
+
+    use embedded_graphics::{
+        fonts::Text, pixelcolor::BinaryColor::Off as White, pixelcolor::BinaryColor::On as Black,
+        prelude::*, text_style,
+    };
+
+    use heapless::{consts::U5, String};
+
+    use ufmt::uwrite;
+
+    use rtic::cyccnt::U32Ext as _;
+
+    #[cfg(not(feature = "usedrogue"))]
+    use bme680::{
+        Bme680, I2CAddress, IIRFilterSize, OversamplingSetting, PowerMode, SettingsBuilder,
+    };
+
+    #[cfg(not(feature = "usedrogue"))]
+    use core::time::Duration;
+
+    #[cfg(feature = "usedrogue")]
+    use drogue_bme680::{Address, Bme680Controller, Bme680Sensor, Configuration, StaticProvider};
+
+    use embedded_hal::digital::v2::InputPin;
+
+    #[cfg(feature = "usesemihosting")]
+    use cortex_m_semihosting::hprintln;
+
+    use debouncr::Edge;
+    use rotary_encoder_hal::{Direction, Rotary};
+
+    use cortex_m::peripheral::DWT;
+    use epd_waveshare::{
+        epd2in13_v2::{Display2in13, EPD2in13},
+        graphics::{Display, DisplayRotation},
+        prelude::*,
+    };
+
+    use ds323x::{Alarm2Matching, DayAlarm2, Ds323x, Hours, NaiveTime, Rtcc, Timelike};
+
+    use smart_leds::{colors, SmartLedsWrite, RGB8};
+
+    use ws2812_spi as ws2812;
+
+    #[cfg(feature = "usesemihosting")]
+    macro_rules! debug_only {
+        ($statement:stmt) => {
+            $statement
+        };
+        ($code:block) => {
+            $code
+        };
+    }
+
+    #[cfg(not(feature = "usesemihosting"))]
+    macro_rules! debug_only {
+        ($statement:stmt) => {};
+        ($code:block) => {};
+    }
+
+    // Runnig at 80Mhz
+    const ONE_MS: u32 = 80_000;
+    const ONE_MUS: u32 = 80;
+
+    const TRANSITION_STEPS: u32 = 50;
+    const TRANSITION_STEP_CYCLES: u32 = (1000 / TRANSITION_STEPS) * ONE_MS;
+
+    // At 80Mhz, this is ~1ms
+    const POLL_SWITCH_PERIOD: u32 = 10 * ONE_MUS;
+    const DEBOUNCE_SAMPLE_CNT: i8 = 20;
+    const ROTARY_SAMPLING_PERIOD: u32 = 10 * ONE_MUS;
+
+    #[resources]
     struct Resources {
         mode: OperatingMode,
 
@@ -357,7 +395,7 @@ const APP: () = {
         state: FSMState,
     }
 
-    #[init(spawn = [refresh_bme680, refresh_time, change_mode, transition_leds])]
+    #[init]
     fn init(mut cx: init::Context) -> init::LateResources {
         // Initialize (enable) the monotonic timer (CYCCNT)
         cx.core.DCB.enable_trace();
@@ -517,8 +555,8 @@ const APP: () = {
         .unwrap();
 
         let time = rtc.get_time().unwrap();
-        cx.spawn.refresh_time(time).unwrap();
-        cx.spawn.refresh_bme680().unwrap();
+        refresh_time::spawn(time).unwrap();
+        refresh_bme680::spawn().unwrap();
 
         let ranges = [
             TimeRange {
@@ -591,13 +629,13 @@ const APP: () = {
                 break;
             }
 
-            cx.spawn.transition_leds(colors::GREEN, 50).unwrap();
+            transition_leds::spawn(colors::GREEN, 50).unwrap();
 
             if time >= range.start && time < range.end {
                 state = FSMState::InRange(i);
                 debug_only! {hprintln!("In range: {}:{}", range.start, range.end).unwrap()}
 
-                cx.spawn.transition_leds(range.in_color, 50).unwrap();
+                transition_leds::spawn(range.in_color, 50).unwrap();
 
                 rtc.set_alarm1_hms(range.end).unwrap();
 
@@ -627,7 +665,7 @@ const APP: () = {
 
         let rotary_pin = portb.pb7.into_pull_up_input();
         let init_state = rotary_pin.is_high().unwrap();
-        let mut rotary_switch = RotarySwitchT::new(rotary_pin, init_state);
+        let rotary_switch = RotarySwitchT::new(rotary_pin, init_state);
 
         // switch is using PUR, is_low() <=> pressed <=> 'true' state
         let toggle_pin = portb.pb5.into_pull_up_input();
@@ -646,7 +684,7 @@ const APP: () = {
             OperatingMode::Normal
         };
 
-        cx.spawn.change_mode(mode).unwrap();
+        change_mode::spawn(mode).unwrap();
 
         debug_only! {
             hprintln!("init done, mode will be {:?}, switch is {:?} debouncer is {:?}",
@@ -688,12 +726,12 @@ const APP: () = {
     }
 
     #[task(
-        priority = 1,
+        priority = 4,
         resources = [mode, rotary, rotary_switch, display, new_time, rtc, rtc_int_pin],
-        spawn = [refresh_epd, rotary_sampling]
     )]
     fn change_mode(mut ctx: change_mode::Context, mode: OperatingMode) {
         let must_continue = ctx.resources.mode.lock(|current_mode| {
+            debug_only! {hprintln!("change mode from {:?} to {:?}", *current_mode, mode).unwrap()}
             let prev_mode = *current_mode;
             *current_mode = mode;
 
@@ -716,94 +754,96 @@ const APP: () = {
                 });
 
                 // Monitor alarms from RTC
-                ctx.resources.rtc_int_pin.clear_interrupt();
-                ctx.resources
-                    .rtc_int_pin
-                    .set_interrupt_mode(InterruptMode::EdgeFalling);
+                ctx.resources.rtc_int_pin.lock(|p| {
+                    p.clear_interrupt();
+                    p.set_interrupt_mode(InterruptMode::EdgeFalling);
+                });
 
                 // Disable anything comming from rotary switch
-                ctx.resources
-                    .rotary_switch
-                    .pin
-                    .set_interrupt_mode(InterruptMode::Disabled);
+                ctx.resources.rotary_switch.lock(|rs| {
+                    rs.pin.set_interrupt_mode(InterruptMode::Disabled);
+                });
 
-                let copy_new_time = &ctx.resources.new_time;
+                let copy_new_time = ctx.resources.new_time.lock(|t| *t);
                 ctx.resources.rtc.lock(|rtc| {
-                    rtc.set_time(copy_new_time).unwrap();
+                    rtc.set_time(&copy_new_time).unwrap();
                 });
             }
             OperatingMode::Configuration(_) => {
-                *ctx.resources.new_time = ctx.resources.rtc.lock(|rtc| rtc.get_time().unwrap());
+                let cur_time = ctx.resources.rtc.lock(|rtc| rtc.get_time().unwrap());
+                ctx.resources.new_time.lock(|t| {
+                    *t = cur_time;
+                });
 
                 ctx.resources.display.lock(|display| {
                     draw_config_hint(display, true);
                 });
-                ctx.spawn.rotary_sampling(true).unwrap();
+                rotary_sampling::spawn(true).unwrap();
 
                 // Do not monitor alarms from RTC
                 ctx.resources
                     .rtc_int_pin
-                    .set_interrupt_mode(InterruptMode::Disabled);
+                    .lock(|p| p.set_interrupt_mode(InterruptMode::Disabled));
 
                 // Enable Rotary switch monitoring
-                ctx.resources.rotary_switch.pin.clear_interrupt();
-                ctx.resources
-                    .rotary_switch
-                    .pin
-                    .set_interrupt_mode(InterruptMode::EdgeBoth);
+                ctx.resources.rotary_switch.lock(|rs| {
+                    rs.pin.clear_interrupt();
+                    rs.pin.set_interrupt_mode(InterruptMode::EdgeBoth);
+                });
             }
         }
-        ctx.spawn.refresh_epd().unwrap();
+        refresh_epd::spawn().unwrap();
     }
 
     #[task(
         priority = 3,
         resources = [mode, toggle_switch],
-        schedule = [poll_toggle_switch],
-        spawn = [change_mode]
     )]
-    fn poll_toggle_switch(ctx: poll_toggle_switch::Context) {
-        // Poll button
-        let pressed: bool = ctx.resources.toggle_switch.pin.is_high().unwrap();
-
-        // Update state
-        let edge = ctx.resources.toggle_switch.debouncer.update(pressed);
-        ctx.resources.toggle_switch.sample_count -= 1;
-
-        // Dispatch event
-        if edge == Some(Edge::Rising) {
-            ctx.resources.toggle_switch.sample_count = -1;
-            ctx.spawn
-                .change_mode(OperatingMode::Configuration(SubConfig::Hour))
-                .unwrap();
-        } else if edge == Some(Edge::Falling) {
-            ctx.resources.toggle_switch.sample_count = -1;
-            ctx.spawn.change_mode(OperatingMode::Normal).unwrap();
-        } else if ctx.resources.toggle_switch.sample_count > 0 {
-            // Re-schedule the timer interrupt to get enough samples
-            ctx.schedule
-                .poll_toggle_switch(ctx.scheduled + POLL_SWITCH_PERIOD.cycles())
-                .unwrap();
-        } else {
-            debug_only! {hprintln!("nothing ? {:?} {:?}", pressed, ctx.resources.toggle_switch.pin.is_high().unwrap()).unwrap()}
-
-            debug_only! {
-                hprintln!("mode is {:?}, switch is {:?} debouncer is {:?}",
-                          ctx.resources.mode,
-                          ctx.resources.toggle_switch.pin.is_high().unwrap(),
-                          ctx.resources.toggle_switch.debouncer.is_high())
-                    .unwrap()
-            }
-
-            ctx.resources.toggle_switch.sample_count = -1;
+    fn poll_toggle_switch(mut ctx: poll_toggle_switch::Context, first: bool) {
+        if first {
+            debug_only! {hprintln!("poll toggle sampling").unwrap()}
         }
+
+        // Poll button
+        let scheduled = ctx.scheduled;
+
+        ctx.resources.toggle_switch.lock(|ts| {
+            let pressed = ts.pin.is_high().unwrap();
+            ts.sample_count -= 1;
+
+            // Update state
+            let edge = ts.debouncer.update(pressed);
+
+            // Dispatch event
+            if edge == Some(Edge::Rising) {
+                ts.sample_count = -1;
+                change_mode::spawn(OperatingMode::Configuration(SubConfig::Hour))
+                    .unwrap();
+            } else if edge == Some(Edge::Falling) {
+                ts.sample_count = -1;
+                change_mode::spawn(OperatingMode::Normal).unwrap();
+            } else if ts.sample_count > 0 {
+                // Re-schedule the timer interrupt to get enough samples
+                poll_toggle_switch::schedule(scheduled + POLL_SWITCH_PERIOD.cycles(), false).unwrap();
+            } else {
+                debug_only! {hprintln!("nothing ? {:?} {:?}", pressed, ts.pin.is_high().unwrap()).unwrap()}
+
+                // debug_only! {
+                //     hprintln!("mode is {:?}, switch is {:?} debouncer is {:?}",
+                //               ctx.resources.mode,
+                //               ctx.resources.toggle_switch.pin.is_high().unwrap(),
+                //               ctx.resources.toggle_switch.debouncer.is_high())
+                //         .unwrap()
+                // }
+
+                ts.sample_count = -1;
+            }
+        });
     }
 
     #[task(
         priority = 1,
         resources = [leds_data],
-        schedule = [transition_leds],
-        spawn = [refresh_leds]
     )]
     fn transition_leds(mut cx: transition_leds::Context, to: RGB8, trans_step: u32) {
         cx.resources.leds_data.lock(|leds| {
@@ -824,259 +864,251 @@ const APP: () = {
         });
 
         if trans_step > 1 {
-            cx.schedule
-                .transition_leds(
-                    cx.scheduled + TRANSITION_STEP_CYCLES.cycles(),
-                    to,
-                    trans_step - 1,
-                )
-                .unwrap();
-        }
-        cx.spawn.refresh_leds().unwrap();
-    }
-
-    #[task(priority = 3, resources = [leds, leds_data])]
-    fn refresh_leds(cx: refresh_leds::Context) {
-        cx.resources
-            .leds
-            .write(cx.resources.leds_data.iter().cloned())
+            transition_leds::schedule(
+                cx.scheduled + TRANSITION_STEP_CYCLES.cycles(),
+                to,
+                trans_step - 1,
+            )
             .unwrap();
-    }
-
-    #[task(priority = 3, resources = [leds_data], spawn = [refresh_leds])]
-    fn rotate_leds(cx: rotate_leds::Context, rotate_right: bool, num: usize) {
-        if rotate_right {
-            cx.resources.leds_data[0..].rotate_right(num);
-        } else {
-            cx.resources.leds_data[0..].rotate_left(num);
         }
-
-        cx.spawn.refresh_leds().unwrap();
+        refresh_leds::spawn().unwrap();
     }
 
-    #[task(priority = 3, resources = [leds_data], spawn = [refresh_leds])]
-    fn set_leds(cx: set_leds::Context, start_index: usize, number_of_leds: usize, color: RGB8) {
-        for led in &mut cx.resources.leds_data[start_index..start_index + number_of_leds] {
-            *led = color;
-        }
-        cx.spawn.refresh_leds().unwrap();
+    #[task(priority = 1, resources = [leds, leds_data])]
+    fn refresh_leds(cx: refresh_leds::Context) {
+        (cx.resources.leds_data, cx.resources.leds).lock(|leds_data, leds| {
+            leds.write(leds_data.iter().cloned()).unwrap();
+        });
     }
 
-    #[task(priority = 3, spawn = [set_leds, transition_leds], resources = [rtc, ranges, state, next_or_current_range])]
-    fn handle_event_alarm(cx: handle_event_alarm::Context, time: NaiveTime) {
+    // #[task(priority = 3, resources = [leds_data])]
+    // fn rotate_leds(mut cx: rotate_leds::Context, rotate_right: bool, num: usize) {
+    //     cx.resources.leds_data.lock(|ld| {
+    //         if rotate_right {
+    //             ld[0..].rotate_right(num);
+    //         } else {
+    //             ld[0..].rotate_left(num);
+    //         }
+    //     });
+    //     refresh_leds::spawn().unwrap();
+    // }
+
+    // #[task(priority = 3, resources = [leds_data])]
+    // fn set_leds(mut cx: set_leds::Context, start_index: usize, number_of_leds: usize, color: RGB8) {
+    //     cx.resources.leds_data.lock(|ld| {
+    //         for led in &mut ld[start_index..start_index + number_of_leds] {
+    //             *led = color;
+    //         }
+    //     });
+    //     refresh_leds::spawn().unwrap();
+    // }
+
+    #[task(priority = 3, resources = [rtc, ranges, state, next_or_current_range])]
+    fn handle_event_alarm(cx: handle_event_alarm::Context) {
         debug_only! {hprintln!("handle event alarm! {} {}", time.hour(), time.minute()).unwrap()}
 
-        let ns = match cx.resources.state {
-            FSMState::Idle => None,
-            FSMState::WaitNextRange(ref range) => {
-                debug_only! {hprintln!("Enter").unwrap()}
+        (cx.resources.state, cx.resources.ranges , cx.resources.rtc).lock(|state, ranges, rtc| {
+            let ns = match state {
+                FSMState::Idle => None,
+                FSMState::WaitNextRange(ref range) => {
+                    debug_only! {hprintln!("Enter").unwrap()}
 
-                cx.spawn
-                    .transition_leds(cx.resources.ranges[*range].in_color, TRANSITION_STEPS)
-                    .unwrap();
-
-                debug_only! {hprintln!("Time: {}, Alarm :{}", time, cx.resources.ranges[*range].end).unwrap()}
-                cx.resources
-                    .rtc
-                    .set_alarm1_hms(cx.resources.ranges[*range].end)
-                    .unwrap();
-
-                Some(FSMState::InRange(*range))
-            }
-
-            FSMState::InRange(ref range) => {
-                debug_only! {hprintln!("Exit").unwrap()}
-
-                cx.spawn.transition_leds(colors::GREEN, 50).unwrap();
-
-                if *range == cx.resources.ranges.len() - 1 {
-                    cx.resources
-                        .rtc
-                        .set_alarm1_hms(cx.resources.ranges[0].start)
+                    transition_leds::spawn(ranges[*range].in_color, TRANSITION_STEPS)
                         .unwrap();
-                    Some(FSMState::WaitNextRange(0))
-                } else {
-                    cx.resources
-                        .rtc
-                        .set_alarm1_hms(cx.resources.ranges[*range + 1].start)
+
+                    debug_only! {hprintln!("Time: {}, Alarm :{}", time, ranges[*range].end).unwrap()}
+                        rtc
+                        .set_alarm1_hms(ranges[*range].end)
                         .unwrap();
-                    Some(FSMState::WaitNextRange(*range + 1))
+
+                    Some(FSMState::InRange(*range))
                 }
-            }
-        };
 
-        if let Some(new_state) = ns {
-            *cx.resources.state = new_state;
-        }
+                FSMState::InRange(ref range) => {
+                    debug_only! {hprintln!("Exit").unwrap()}
+
+                    transition_leds::spawn(colors::GREEN, 50).unwrap();
+
+                    if *range == ranges.len() - 1 {
+                            rtc
+                            .set_alarm1_hms(ranges[0].start)
+                            .unwrap();
+                        Some(FSMState::WaitNextRange(0))
+                    } else {
+                            rtc
+                            .set_alarm1_hms(ranges[*range + 1].start)
+                            .unwrap();
+                        Some(FSMState::WaitNextRange(*range + 1))
+                    }
+                }
+            };
+
+            if let Some(new_state) = ns {
+                *state = new_state;
+            }
+        });
     }
 
     #[task(priority = 5, resources = [screen, display])]
-    fn refresh_epd(mut cx: refresh_epd::Context) {
-        let do_full_refresh = cx.resources.screen.quick_refresh_count > MAX_NUM_QUICK_REFRESH;
+    fn refresh_epd(cx: refresh_epd::Context) {
+        (cx.resources.screen, cx.resources.display).lock(|screen, display| {
+            let do_full_refresh = screen.quick_refresh_count > MAX_NUM_QUICK_REFRESH;
 
-        let mut errcnt_s: String<U5> = String::new();
-        uwrite!(errcnt_s, "#{}", cx.resources.screen.quick_refresh_count).unwrap();
+            let mut errcnt_s: String<U5> = String::new();
+            uwrite!(errcnt_s, "#{}", screen.quick_refresh_count).unwrap();
 
-        let _ = Text::new(
-            &errcnt_s,
-            Point::new(SCR_RIGHT_BAR_ERRCNT_X_OFF, SCR_RIGHT_BAR_ERRCNT_Y_OFF + 16),
-        )
-        .into_styled(text_style!(
-            font = FONT_RIGHT_BAR,
-            text_color = Black,
-            background_color = White
-        ))
-        .draw(cx.resources.display);
+            let _ = Text::new(
+                &errcnt_s,
+                Point::new(SCR_RIGHT_BAR_ERRCNT_X_OFF, SCR_RIGHT_BAR_ERRCNT_Y_OFF + 16),
+            )
+            .into_styled(text_style!(
+                font = FONT_RIGHT_BAR,
+                text_color = Black,
+                background_color = White
+            ))
+            .draw(display);
 
-        if do_full_refresh {
-            cx.resources.screen.quick_refresh_count = 0;
-            cx.resources
-                .screen
+            if do_full_refresh {
+                screen.quick_refresh_count = 0;
+                screen
+                    .epd
+                    .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLUT::FULL)
+                    .unwrap();
+            }
+
+            screen
                 .epd
-                .set_refresh(
-                    &mut cx.resources.screen.spi,
-                    &mut cx.resources.screen.delay,
-                    RefreshLUT::FULL,
-                )
+                .update_and_display_frame(&mut screen.spi, &display.buffer())
                 .unwrap();
-        }
 
-        cx.resources
-            .screen
-            .epd
-            .update_and_display_frame(&mut cx.resources.screen.spi, &cx.resources.display.buffer())
-            .unwrap();
-
-        if do_full_refresh {
-            cx.resources
-                .screen
-                .epd
-                .set_refresh(
-                    &mut cx.resources.screen.spi,
-                    &mut cx.resources.screen.delay,
-                    RefreshLUT::QUICK,
-                )
-                .unwrap();
-        }
-        cx.resources.screen.quick_refresh_count += 1;
+            if do_full_refresh {
+                screen
+                    .epd
+                    .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLUT::QUICK)
+                    .unwrap();
+            }
+            screen.quick_refresh_count += 1;
+        });
     }
 
-    #[task(priority = 5, resources = [display, bme680, i2c_error], spawn = [refresh_epd])]
+    #[task(priority = 5, resources = [display, bme680, i2c_error])]
     fn refresh_bme680(cx: refresh_bme680::Context) {
-        let (temp, _pres, humid, _gas): (i32, i32, i32, i32);
+        // #[cfg(not(feature = "usedrogue"))]
+        // if let Ok(_) = cx.resources.bme680.set_sensor_mode(PowerMode::ForcedMode) {
+        //     let (data, _state) = cx.resources.bme680.get_sensor_data().unwrap();
 
-        #[cfg(not(feature = "usedrogue"))]
-        if let Ok(_) = cx.resources.bme680.set_sensor_mode(PowerMode::ForcedMode) {
-            let (data, _state) = cx.resources.bme680.get_sensor_data().unwrap();
+        //     temp = data.temperature_celsius() as i32;
+        //     _pres = data.pressure_hpa() as i32;
+        //     humid = data.humidity_percent() as i32;
+        //     _gas = data.gas_resistance_ohm() as i32;
+        // } else {
+        //     // For some reason, the bme680 seems to stop responding and a hw
+        //     // reset is needed to make it work again. Maybe caused by the
+        //     // current spaghetti setup used for prototyping.
+        //     // Simply count the errors
+        //     temp = 0i32;
+        //     _pres = 0i32;
+        //     humid = 0i32;
+        //     _gas = 0i32;
+        //     *cx.resources.i2c_error += 1;
+        //     debug_only! {hprintln!("I2C bme680 error for bme").unwrap()}
+        // }
 
-            temp = data.temperature_celsius() as i32;
-            _pres = data.pressure_hpa() as i32;
-            humid = data.humidity_percent() as i32;
-            _gas = data.gas_resistance_ohm() as i32;
-        } else {
-            // For some reason, the bme680 seems to stop responding and a hw
-            // reset is needed to make it work again. Maybe caused by the
-            // current spaghetti setup used for prototyping.
-            // Simply count the errors
-            temp = 0i32;
-            _pres = 0i32;
-            humid = 0i32;
-            _gas = 0i32;
-            *cx.resources.i2c_error += 1;
-            debug_only! {hprintln!("I2C bme680 error for bme").unwrap()}
-        }
+        (cx.resources.bme680, cx.resources.i2c_error, cx.resources.display ).lock(|bme680, i2c_error, display| {
+            let (temp, _pres, humid, _gas): (i32, i32, i32, i32);
 
-        #[cfg(feature = "usedrogue")]
-        if let Ok(opt_data) = cx.resources.bme680.measure_default() {
-            if let Some(data) = opt_data {
-                temp = data.temperature as i32;
-                _pres = if let Some(f) = data.pressure {
-                    f as i32
+            #[cfg(feature = "usedrogue")]
+            if let Ok(opt_data) = bme680.measure_default() {
+                if let Some(data) = opt_data {
+                    temp = data.temperature as i32;
+                    _pres = if let Some(f) = data.pressure {
+                        f as i32
+                    } else {
+                        0
+                    };
+                    humid = data.humidity as i32;
+                    _gas = data.gas_resistance as i32;
                 } else {
-                    0
-                };
-                humid = data.humidity as i32;
-                _gas = data.gas_resistance as i32;
+                    temp = 0i32;
+                    _pres = 0i32;
+                    humid = 0i32;
+                    _gas = 0i32;
+                    *i2c_error += 1;
+                    debug_only! {hprintln!("I2C OK, but empty result from drogue_bme680").unwrap()}
+                }
             } else {
+                // For some reason, the bme680 seems to stop responding and a hw
+                // reset is needed to make it work again. Maybe caused by the
+                // current spaghetti setup used for prototyping.
+                // Simply count the errors
                 temp = 0i32;
                 _pres = 0i32;
                 humid = 0i32;
                 _gas = 0i32;
-                *cx.resources.i2c_error += 1;
-                debug_only! {hprintln!("I2C OK, but empty result from drogue_bme680").unwrap()}
+                *i2c_error += 1;
+                debug_only! {hprintln!("I2C error drogue_bme680 for bme").unwrap()}
+                bme680.soft_reinit().unwrap();
             }
-        } else {
-            // For some reason, the bme680 seems to stop responding and a hw
-            // reset is needed to make it work again. Maybe caused by the
-            // current spaghetti setup used for prototyping.
-            // Simply count the errors
-            temp = 0i32;
-            _pres = 0i32;
-            humid = 0i32;
-            _gas = 0i32;
-            *cx.resources.i2c_error += 1;
-            debug_only! {hprintln!("I2C error drogue_bme680 for bme").unwrap()}
-            cx.resources.bme680.soft_reinit().unwrap();
-        }
 
-        let cur_i2c_error = *cx.resources.i2c_error;
+            let cur_i2c_error = *i2c_error;
 
-        let mut temp_s: String<U5> = String::new();
-        uwrite!(temp_s, "{}{}°C", if temp < 10 { " " } else { "" }, temp).unwrap();
+            let mut temp_s: String<U5> = String::new();
+            uwrite!(temp_s, "{}{}°C", if temp < 10 { " " } else { "" }, temp).unwrap();
 
-        let mut humid_s: String<U5> = String::new();
-        uwrite!(
-            humid_s,
-            "{}{}%",
-            if humid < 10 {
-                "  "
-            } else if humid < 100 {
-                " "
-            } else {
-                ""
-            },
-            humid
-        )
-        .unwrap();
+            let mut humid_s: String<U5> = String::new();
+            uwrite!(
+                humid_s,
+                "{}{}%",
+                if humid < 10 {
+                    "  "
+                } else if humid < 100 {
+                    " "
+                } else {
+                    ""
+                },
+                humid
+            )
+                .unwrap();
 
-        let _ = Text::new(
-            &temp_s,
-            Point::new(SCR_RIGHT_BAR_TEMP_X_OFF, SCR_RIGHT_BAR_TEMP_Y_OFF),
-        )
-        .into_styled(text_style!(
-            font = FONT_RIGHT_BAR,
-            text_color = Black,
-            background_color = White
-        ))
-        .draw(cx.resources.display);
+            let _ = Text::new(
+                &temp_s,
+                Point::new(SCR_RIGHT_BAR_TEMP_X_OFF, SCR_RIGHT_BAR_TEMP_Y_OFF),
+            )
+                .into_styled(text_style!(
+                    font = FONT_RIGHT_BAR,
+                    text_color = Black,
+                    background_color = White
+                ))
+                .draw(display);
 
-        let _ = Text::new(
-            &humid_s,
-            Point::new(SCR_RIGHT_BAR_HUMID_X_OFF, SCR_RIGHT_BAR_HUMID_Y_OFF),
-        )
-        .into_styled(text_style!(
-            font = FONT_RIGHT_BAR,
-            text_color = Black,
-            background_color = White
-        ))
-        .draw(cx.resources.display);
+            let _ = Text::new(
+                &humid_s,
+                Point::new(SCR_RIGHT_BAR_HUMID_X_OFF, SCR_RIGHT_BAR_HUMID_Y_OFF),
+            )
+                .into_styled(text_style!(
+                    font = FONT_RIGHT_BAR,
+                    text_color = Black,
+                    background_color = White
+                ))
+                .draw(display);
 
-        let mut errcnt_s: String<U5> = String::new();
-        uwrite!(errcnt_s, "#{}", cur_i2c_error).unwrap();
+            let mut errcnt_s: String<U5> = String::new();
+            uwrite!(errcnt_s, "#{}", cur_i2c_error).unwrap();
 
-        let _ = Text::new(
-            &errcnt_s,
-            Point::new(SCR_RIGHT_BAR_ERRCNT_X_OFF, SCR_RIGHT_BAR_ERRCNT_Y_OFF),
-        )
-        .into_styled(text_style!(
-            font = FONT_RIGHT_BAR,
-            text_color = Black,
-            background_color = White
-        ))
-        .draw(cx.resources.display);
+            let _ = Text::new(
+                &errcnt_s,
+                Point::new(SCR_RIGHT_BAR_ERRCNT_X_OFF, SCR_RIGHT_BAR_ERRCNT_Y_OFF),
+            )
+                .into_styled(text_style!(
+                    font = FONT_RIGHT_BAR,
+                    text_color = Black,
+                    background_color = White
+                ))
+                .draw(display);
+        });
     }
 
-    #[task(priority = 1, resources = [display], spawn = [refresh_epd])]
+    #[task(priority = 1, capacity = 2, resources = [display])]
     fn refresh_time(mut cx: refresh_time::Context, time: NaiveTime) {
         cx.resources.display.lock(|display| {
             // Only "HH:MM"
@@ -1103,130 +1135,133 @@ const APP: () = {
                 .draw(display);
         });
 
-        cx.spawn.refresh_epd().unwrap();
+        refresh_epd::spawn().unwrap();
     }
 
-    #[task(priority = 1,
-           schedule = [rotary_sampling],
-           spawn = [knob_turned, change_mode],
+    #[task(priority = 3,
            resources =[mode, rotary, rotary_switch])]
-    fn rotary_sampling(mut cx: rotary_sampling::Context, first: bool) {
+    fn rotary_sampling(cx: rotary_sampling::Context, first: bool) {
         if first {
             debug_only! {hprintln!("rotary sampling").unwrap()}
         }
+        let scheduled = cx.scheduled;
+        let mut maybe_change_mode: Option<OperatingMode> = None;
 
-        let current_mode = cx.resources.mode.lock(|m| *m);
+        (
+            cx.resources.mode,
+            cx.resources.rotary_switch,
+            cx.resources.rotary,
+        )
+            .lock(|mode, rs, r| {
+                let current_mode = *mode;
 
-        match current_mode {
-            OperatingMode::Normal => {
-                debug_only! {hprintln!("Stopping rotary sampling").unwrap()}
-            }
-
-            OperatingMode::Configuration(_) => {
-                // Refresh Rotary encoder and maybe spawn handler
-                let dir = cx.resources.rotary.update().unwrap();
-                match dir {
-                    Direction::Clockwise | Direction::CounterClockwise => {
-                        cx.spawn.knob_turned(dir).unwrap();
+                match current_mode {
+                    OperatingMode::Normal => {
+                        debug_only! {hprintln!("Stopping rotary sampling").unwrap()}
                     }
-                    Direction::None => {}
-                }
 
-                // Refresh switch and maybe spawn handler
-                let pressed: bool = cx.resources.rotary_switch.pin.is_low().unwrap();
-                let edge = cx.resources.rotary_switch.debouncer.update(pressed);
-
-                // Dispatch event
-                if edge == Some(Edge::Rising) {
-                    debug_only! {hprintln!("rotary PRESSED").unwrap()}
-                } else if edge == Some(Edge::Falling) {
-                    debug_only! {hprintln!("rotary RELEASED").unwrap()}
-                    let new_mode = match current_mode {
-                        OperatingMode::Normal => OperatingMode::Normal,
-                        OperatingMode::Configuration(SubConfig::Hour) => {
-                            OperatingMode::Configuration(SubConfig::Minute)
+                    OperatingMode::Configuration(_) => {
+                        // Refresh Rotary encoder and maybe spawn handler
+                        let dir = r.update().unwrap();
+                        match dir {
+                            Direction::Clockwise | Direction::CounterClockwise => {
+                                knob_turned::spawn(dir).unwrap();
+                            }
+                            Direction::None => {}
                         }
-                        OperatingMode::Configuration(SubConfig::Minute) => {
-                            OperatingMode::Configuration(SubConfig::Hour)
+
+                        // Refresh switch and maybe spawn handler
+                        let pressed: bool = rs.pin.is_low().unwrap();
+                        let edge = rs.debouncer.update(pressed);
+
+                        // Dispatch event
+                        if edge == Some(Edge::Rising) {
+                            debug_only! {hprintln!("rotary PRESSED").unwrap()}
+                        } else if edge == Some(Edge::Falling) {
+                            debug_only! {hprintln!("rotary RELEASED").unwrap()}
+                            let new_mode = match current_mode {
+                                OperatingMode::Normal => OperatingMode::Normal,
+                                OperatingMode::Configuration(SubConfig::Hour) => {
+                                    OperatingMode::Configuration(SubConfig::Minute)
+                                }
+                                OperatingMode::Configuration(SubConfig::Minute) => {
+                                    OperatingMode::Configuration(SubConfig::Hour)
+                                }
+                            };
+                            maybe_change_mode = Some(new_mode);
                         }
-                    };
 
-                    cx.spawn.change_mode(new_mode).unwrap();
+                        // Continue sampling
+                        rotary_sampling::schedule(
+                            scheduled + ROTARY_SAMPLING_PERIOD.cycles(),
+                            false,
+                        )
+                        .unwrap();
+                    }
                 }
+            });
 
-                // Continue sampling
-                cx.schedule
-                    .rotary_sampling(cx.scheduled + ROTARY_SAMPLING_PERIOD.cycles(), false)
-                    .unwrap();
-            }
+        if let Some(new_mode) = maybe_change_mode {
+            change_mode::spawn(new_mode).unwrap();
         }
     }
 
-    #[task(priority = 1, spawn = [refresh_time, rotate_leds], resources =[rtc, new_time, mode])]
-    fn knob_turned(mut cx: knob_turned::Context, dir: Direction) {
-        let current_mode = cx.resources.mode.lock(|m| *m);
-        debug_only! {hprintln!("knob turned {:?} {:?}", dir, current_mode).unwrap()}
-        match dir {
-            Direction::Clockwise => {
-                cx.spawn.rotate_leds(true, 1).unwrap();
-                if current_mode == OperatingMode::Configuration(SubConfig::Hour) {
-                    *cx.resources.new_time = cx
-                        .resources
-                        .new_time
-                        .overflowing_add_signed(chrono::Duration::hours(1))
-                        .0;
-                } else {
-                    *cx.resources.new_time = cx
-                        .resources
-                        .new_time
-                        .overflowing_add_signed(chrono::Duration::minutes(1))
-                        .0;
+    #[task(priority = 1, resources =[rtc, new_time, mode])]
+    fn knob_turned(cx: knob_turned::Context, dir: Direction) {
+        (cx.resources.mode, cx.resources.new_time).lock(|mode, new_time| {
+            let current_mode = *mode;
+            debug_only! {hprintln!("knob turned {:?} {:?}", dir, current_mode).unwrap()}
+            match dir {
+                Direction::Clockwise => {
+                    //                    rotate_leds::spawn(true, 1).unwrap();
+                    if current_mode == OperatingMode::Configuration(SubConfig::Hour) {
+                        *new_time = new_time
+                            .overflowing_add_signed(chrono::Duration::hours(1))
+                            .0;
+                    } else {
+                        *new_time = new_time
+                            .overflowing_add_signed(chrono::Duration::minutes(1))
+                            .0;
+                    }
                 }
-            }
-            Direction::CounterClockwise => {
-                cx.spawn.rotate_leds(false, 1).unwrap();
-                if current_mode == OperatingMode::Configuration(SubConfig::Hour) {
-                    *cx.resources.new_time = cx
-                        .resources
-                        .new_time
-                        .overflowing_add_signed(chrono::Duration::hours(-1))
-                        .0;
-                } else {
-                    *cx.resources.new_time = cx
-                        .resources
-                        .new_time
-                        .overflowing_add_signed(chrono::Duration::minutes(-1))
-                        .0;
+                Direction::CounterClockwise => {
+                    //                    rotate_leds::spawn(false, 1).unwrap();
+                    if current_mode == OperatingMode::Configuration(SubConfig::Hour) {
+                        *new_time = new_time
+                            .overflowing_add_signed(chrono::Duration::hours(-1))
+                            .0;
+                    } else {
+                        *new_time = new_time
+                            .overflowing_add_signed(chrono::Duration::minutes(-1))
+                            .0;
+                    }
                 }
+                _ => (),
             }
-            _ => (),
-        }
 
-        cx.spawn.refresh_time(*cx.resources.new_time).unwrap();
+            refresh_time::spawn(*new_time).unwrap();
+        });
     }
 
-    #[task(binds = GPIOB, resources = [toggle_switch], spawn = [ poll_toggle_switch ])]
+    #[task(priority = 4, binds = GPIOB, resources = [toggle_switch])]
     fn gpiob(mut cx: gpiob::Context) {
-        let need_spawn = cx.resources.toggle_switch.lock(|ts| {
+        cx.resources.toggle_switch.lock(|ts| {
             if ts.pin.get_interrupt_status() {
-                debug_only! {hprintln!("toggle switch IT raised, starting debouncing sampling!").unwrap()}
+                debug_only! {hprintln!("toggle switch IT raised!").unwrap()}
                 ts.pin.clear_interrupt();
 
                 if ts.sample_count == -1 {
                     debug_only! {hprintln!("Starting toggle switch sampling").unwrap()}
                     ts.sample_count = DEBOUNCE_SAMPLE_CNT;
-                    return true;
+                    poll_toggle_switch::spawn(true).unwrap();
+                } else {
+                    debug_only! {hprintln!("Not starting toggle switch sampling as it's already running").unwrap()}
                 }
             }
-            false
         });
-
-        if need_spawn {
-            cx.spawn.poll_toggle_switch().unwrap();
-        }
     }
 
-    #[task(binds = GPIOD, resources = [rtc, mode, rtc_int_pin], spawn = [refresh_time, refresh_bme680, handle_event_alarm] )]
+    #[task(priority = 4, binds = GPIOD, resources = [rtc, mode, rtc_int_pin])]
     fn gpiod(mut cx: gpiod::Context) {
         let mut a1 = false;
         let mut a2 = false;
@@ -1244,34 +1279,23 @@ const APP: () = {
         });
 
         if a1 {
-            cx.spawn.handle_event_alarm(time).unwrap();
+            handle_event_alarm::spawn().unwrap();
         }
+
+        cx.resources.rtc_int_pin.lock(|p| p.clear_interrupt());
 
         if cx
             .resources
             .mode
             .lock(|mode| a2 && *mode == OperatingMode::Normal)
         {
-            cx.spawn.refresh_bme680().unwrap();
-            cx.spawn.refresh_time(time).unwrap();
+            refresh_bme680::spawn().unwrap();
+            refresh_time::spawn(time).unwrap();
         }
-
-        cx.resources.rtc_int_pin.clear_interrupt();
 
         debug_only! {hprintln!("hep").unwrap()}
     }
-
-    // Use some UARTs as dispatch interrupt.
-    extern "C" {
-        fn UART3();
-    }
-    extern "C" {
-        fn UART4();
-    }
-    extern "C" {
-        fn UART2();
-    }
-};
+}
 
 fn draw_config_hint(display: &mut Display2in13, is_config: bool) {
     let text = if is_config { "C" } else { " " };

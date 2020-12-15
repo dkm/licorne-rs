@@ -271,10 +271,6 @@ type RotarySwitchT = Switch<RotarySwitchPinT>;
 
 #[rtic::app(device = tm4c123x_hal::pac, peripherals = true, monotonic = rtic::cyccnt::CYCCNT, dispatchers = [UART1, UART2, UART3, UART4])]
 mod app {
-    extern crate rtic_core;
-
-    use rtic_core::prelude::*;
-
     use crate::{
         draw_config_hint, Bme680T, FSMState, OperatingMode, RotarySwitchT, RotaryT, RtcT, Screen,
         SimpleAsmDelay, Spi1T, SubConfig, TimeRange, ToggleSwitchT, FONT_RIGHT_BAR, FONT_TIME,

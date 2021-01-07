@@ -19,7 +19,6 @@ extern crate tm4c123x_hal;
 extern crate tm4c_hal;
 extern crate ws2812_spi;
 
-#[cfg(feature = "usedrogue")]
 extern crate embedded_time;
 
 use embedded_hal::{
@@ -61,7 +60,6 @@ pub struct SimpleAsmDelay {
     freq: u32,
 }
 
-#[cfg(feature = "usedrogue")]
 impl drogue_bme680::Delay for SimpleAsmDelay {
     fn delay_ms(&self, duration_ms: u16) {
         cortex_m::asm::delay(self.freq * cast::u32(duration_ms) * 1000 / 1_000_000)
@@ -141,7 +139,6 @@ use tm4c123x_hal::{
     tm4c123x::{I2C0, I2C1, SSI0, SSI1},
 };
 
-#[cfg(feature = "usedrogue")]
 use drogue_bme680::{Bme680Controller, StaticProvider};
 
 use debouncr::{debounce_stateful_12, DebouncerStateful, Repeat12};
@@ -169,10 +166,7 @@ type I2c1T = I2c<
         PA7<AlternateFunction<AF3, OpenDrain<Floating>>>,
     ),
 >;
-#[cfg(not(feature = "usedrogue"))]
-type Bme680T = Bme680<I2c1T, SimpleAsmDelay>;
 
-#[cfg(feature = "usedrogue")]
 type Bme680T = Bme680Controller<I2c1T, SimpleAsmDelay, StaticProvider>;
 
 // spi for EPD
@@ -298,15 +292,6 @@ mod app {
 
     use rtic::cyccnt::U32Ext as _;
 
-    #[cfg(not(feature = "usedrogue"))]
-    use bme680::{
-        Bme680, I2CAddress, IIRFilterSize, OversamplingSetting, PowerMode, SettingsBuilder,
-    };
-
-    #[cfg(not(feature = "usedrogue"))]
-    use core::time::Duration;
-
-    #[cfg(feature = "usedrogue")]
     use drogue_bme680::{Address, Bme680Controller, Bme680Sensor, Configuration, StaticProvider};
 
     use embedded_hal::digital::v2::InputPin;
@@ -463,30 +448,8 @@ mod app {
             &sc.power_control,
         );
 
-        #[cfg(not(feature = "usedrogue"))]
-        let mut bme680 = Bme680::init(
-            i2c_bme680,
-            SimpleAsmDelay { freq: 80_000_000 },
-            I2CAddress::Primary,
-        )
-        .unwrap();
-
-        #[cfg(not(feature = "usedrogue"))]
-        let settings = SettingsBuilder::new()
-            .with_humidity_oversampling(OversamplingSetting::OS2x)
-            .with_pressure_oversampling(OversamplingSetting::OS4x)
-            .with_temperature_oversampling(OversamplingSetting::OS8x)
-            .with_temperature_filter(IIRFilterSize::Size3)
-            .with_gas_measurement(Duration::from_millis(1500), 320, 25)
-            .with_run_gas(true)
-            .build();
-        #[cfg(not(feature = "usedrogue"))]
-        bme680.set_sensor_settings(settings).unwrap();
-
-        #[cfg(feature = "usedrogue")]
         let bme680_sensor = Bme680Sensor::from(i2c_bme680, Address::Primary).unwrap();
 
-        #[cfg(feature = "usedrogue")]
         let bme680 = Bme680Controller::new(
             bme680_sensor,
             SimpleAsmDelay { freq: 80_000_000 },
@@ -988,32 +951,10 @@ mod app {
     }
 
     #[task(priority = 5, resources = [display, bme680, i2c_error])]
-    fn refresh_bme680(cx: refresh_bme680::Context) {
-        // #[cfg(not(feature = "usedrogue"))]
-        // if let Ok(_) = cx.resources.bme680.set_sensor_mode(PowerMode::ForcedMode) {
-        //     let (data, _state) = cx.resources.bme680.get_sensor_data().unwrap();
-
-        //     temp = data.temperature_celsius() as i32;
-        //     _pres = data.pressure_hpa() as i32;
-        //     humid = data.humidity_percent() as i32;
-        //     _gas = data.gas_resistance_ohm() as i32;
-        // } else {
-        //     // For some reason, the bme680 seems to stop responding and a hw
-        //     // reset is needed to make it work again. Maybe caused by the
-        //     // current spaghetti setup used for prototyping.
-        //     // Simply count the errors
-        //     temp = 0i32;
-        //     _pres = 0i32;
-        //     humid = 0i32;
-        //     _gas = 0i32;
-        //     *cx.resources.i2c_error += 1;
-        //     debug_only! {hprintln!("I2C bme680 error for bme").unwrap()}
-        // }
-
+    fn refresh_bme680(cx: refresh_bme680::Context, refresh_epd: bool) {
         (cx.resources.bme680, cx.resources.i2c_error, cx.resources.display ).lock(|bme680, i2c_error, display| {
             let (temp, _pres, humid, _gas): (i32, i32, i32, i32);
 
-            #[cfg(feature = "usedrogue")]
             if let Ok(opt_data) = bme680.measure_default() {
                 if let Some(data) = opt_data {
                     temp = data.temperature as i32;

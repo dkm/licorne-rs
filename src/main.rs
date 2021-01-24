@@ -128,7 +128,7 @@ use ds323x::{Ds323x, NaiveTime};
 use tm4c123x_hal::{
     gpio::gpioa::{PA2, PA4, PA5, PA6, PA7},
     gpio::gpiob::{PB1, PB2, PB3, PB4, PB5, PB7},
-    gpio::gpioc::PC6,
+    gpio::gpioc::{PC4, PC6},
     gpio::gpiod::{PD0, PD1, PD2, PD3},
     gpio::gpioe::{PE2, PE4},
     gpio::{
@@ -188,6 +188,13 @@ type Spi1T = Spi<
         PD3<AlternateFunction<AF2, PullDown>>,
     ),
 >;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EPDModeHint {
+    None,
+    ForceFull,
+    ForcePartial,
+}
 
 pub type EpdT = EPD2in13<
     Spi0T,
@@ -260,20 +267,20 @@ where
 type ToggleSwitchPinT = PB5<Input<PullUp>>;
 type ToggleSwitchT = Switch<ToggleSwitchPinT>;
 
-type RotarySwitchPinT = PB7<Input<PullUp>>;
+type RotarySwitchPinT = PC4<Input<PullUp>>;
 type RotarySwitchT = Switch<RotarySwitchPinT>;
 
 #[rtic::app(device = tm4c123x_hal::pac, peripherals = true, monotonic = rtic::cyccnt::CYCCNT, dispatchers = [UART1, UART2, UART3, UART4])]
 mod app {
 
-    use rtic::cyccnt::Instant;
     use crate::{
-        draw_config_hint, Bme680T, FSMState, OperatingMode, RotarySwitchT, RotaryT, RtcT, Screen,
-        SimpleAsmDelay, Spi1T, SubConfig, TimeRange, ToggleSwitchT, FONT_RIGHT_BAR, FONT_TIME,
-        MAX_NUM_QUICK_REFRESH, NUM_LEDS, SCR_HOUR_X_OFF, SCR_HOUR_Y_OFF,
+        draw_config_hint, Bme680T, EPDModeHint, FSMState, OperatingMode, RotarySwitchT, RotaryT,
+        RtcT, Screen, SimpleAsmDelay, Spi1T, SubConfig, TimeRange, ToggleSwitchT, FONT_RIGHT_BAR,
+        FONT_TIME, MAX_NUM_QUICK_REFRESH, NUM_LEDS, SCR_HOUR_X_OFF, SCR_HOUR_Y_OFF,
         SCR_RIGHT_BAR_ERRCNT_X_OFF, SCR_RIGHT_BAR_ERRCNT_Y_OFF, SCR_RIGHT_BAR_HUMID_X_OFF,
         SCR_RIGHT_BAR_HUMID_Y_OFF, SCR_RIGHT_BAR_TEMP_X_OFF, SCR_RIGHT_BAR_TEMP_Y_OFF,
     };
+    use rtic::cyccnt::Instant;
 
     use tm4c123x_hal::{
         gpio::{gpiod::PD6, Floating, GpioExt, Input, InterruptMode, PullUp, AF2, AF3},
@@ -334,16 +341,17 @@ mod app {
     }
 
     // Runnig at 80Mhz
-    const ONE_MS: u32 = 80_000;
-    const ONE_MUS: u32 = 80;
+    const ONE_MUSEC: u32 = 80;
+    const ONE_MSEC: u32 = ONE_MUSEC * 1000;
+    const ONE_SEC: u32 = ONE_MSEC * 1000;
 
     const TRANSITION_STEPS: u32 = 50;
-    const TRANSITION_STEP_CYCLES: u32 = (1000 / TRANSITION_STEPS) * ONE_MS;
+    const TRANSITION_STEP_CYCLES: u32 = (1000 / TRANSITION_STEPS) * ONE_MSEC;
 
     // At 80Mhz, this is ~1ms
-    const POLL_SWITCH_PERIOD: u32 = 10 * ONE_MUS;
+    const POLL_SWITCH_PERIOD: u32 = 10 * ONE_MUSEC;
     const DEBOUNCE_SAMPLE_CNT: i8 = 20;
-    const ROTARY_SAMPLING_PERIOD: u32 = 10 * ONE_MUS;
+    const ROTARY_SAMPLING_PERIOD: u32 = 10 * ONE_MUSEC;
 
     #[resources]
     struct Resources {
@@ -351,12 +359,16 @@ mod app {
         submode: SubConfig,
 
         // The RTC periph
+        #[cfg(feature = "rtc")]
         rtc: RtcT,
 
         // e-ink
+        #[cfg(feature = "epd")]
         screen: Screen,
+
         display: Display2in13,
 
+        #[cfg(feature = "rtc")]
         rtc_int_pin: PD6<Input<PullUp>>,
 
         // ws2812
@@ -364,18 +376,26 @@ mod app {
         leds_data: [RGB8; NUM_LEDS],
 
         // temp & cov
+        #[cfg(feature = "bme")]
         bme680: Bme680T,
 
         toggle_switch: ToggleSwitchT,
         rotary_switch: RotarySwitchT,
+
+        #[cfg(feature = "rtc")]
         new_time: NaiveTime,
 
         rotary: RotaryT,
 
         i2c_error: u32,
 
+        #[cfg(feature = "rtc")]
         next_or_current_range: usize,
-        ranges: [TimeRange; 3],
+
+        #[cfg(feature = "rtc")]
+        ranges: [TimeRange; 2],
+
+        #[cfg(feature = "rtc")]
         state: FSMState,
     }
 
@@ -405,6 +425,7 @@ mod app {
         let mut portd = p.GPIO_PORTD.split(&sc.power_control);
         let porte = p.GPIO_PORTE.split(&sc.power_control);
 
+        #[cfg(feature = "rtc")]
         let i2c_rtc_dev = I2c::i2c0(
             p.I2C0,
             (
@@ -417,6 +438,7 @@ mod app {
             &clocks,
             &sc.power_control,
         );
+        #[cfg(feature = "rtc")]
         let mut rtc = Ds323x::new_ds3231(i2c_rtc_dev);
 
         let mut spi0 = Spi::spi0(
@@ -438,6 +460,8 @@ mod app {
 
         // Cortex-M peripherals
         // : cortex_m::Peripherals
+
+        #[cfg(feature = "bme")]
         let i2c_bme680 = I2c::i2c1(
             p.I2C1,
             (
@@ -451,8 +475,10 @@ mod app {
             &sc.power_control,
         );
 
-        let bme680_sensor = Bme680Sensor::from(i2c_bme680, Address::Primary).unwrap();
+        #[cfg(feature = "bme")]
+        let bme680_sensor = Bme680Sensor::from(i2c_bme680, Address::Secondary).unwrap();
 
+        #[cfg(feature = "bme")]
         let bme680 = Bme680Controller::new(
             bme680_sensor,
             SimpleAsmDelay { freq: 80_000_000 },
@@ -462,12 +488,14 @@ mod app {
         .unwrap();
 
         let mut delay = SimpleAsmDelay { freq: 80_000_000 };
+
+        #[cfg(feature = "epd")]
         let mut epd =
             EPD2in13::new(&mut spi0, cs_pin, busy_pin, dc_pin, rst_pin, &mut delay).unwrap();
 
         let mut display = Display2in13::default();
-        display.set_rotation(DisplayRotation::Rotate90);
 
+        display.set_rotation(DisplayRotation::Rotate90);
         display.clear(White).unwrap();
 
         let spi_ws2812 = Spi::spi1(
@@ -489,145 +517,180 @@ mod app {
         let rot_pinB = portb.pb4.into_pull_up_input();
 
         let rotary = Rotary::new(rot_pinA, rot_pinB);
+        let rotary_pin = portc.pc4.into_pull_up_input();
 
         // GPIO for interrupt
         // SQW/INT pin wired to PD6
+        #[cfg(feature = "rtc")]
         let mut rtc_int_pin = portd.pd6.into_pull_up_input();
-        rtc_int_pin.set_interrupt_mode(InterruptMode::EdgeFalling);
-        rtc_int_pin.clear_interrupt();
 
-        rtc.clear_alarm1_matched_flag().unwrap();
-        rtc.clear_alarm2_matched_flag().unwrap();
+        #[cfg(feature = "rtc")]
+        let ranges;
 
-        rtc.use_int_sqw_output_as_interrupt().unwrap();
+        #[cfg(feature = "rtc")]
+        let (mut next_or_current_range, mut state);
 
-        // alarm1 used to track events
-        // alarm2 used to refresh clock display every minute.
-        rtc.enable_alarm1_interrupts().unwrap();
-        rtc.enable_alarm2_interrupts().unwrap();
+        #[cfg(feature = "rtc")]
+        {
+            rtc_int_pin.set_interrupt_mode(InterruptMode::EdgeFalling);
+            rtc_int_pin.clear_interrupt();
+            rtc.clear_alarm1_matched_flag().unwrap();
+            rtc.clear_alarm2_matched_flag().unwrap();
+            rtc.use_int_sqw_output_as_interrupt().unwrap();
 
-        rtc.set_alarm2_day(
-            DayAlarm2 {
-                day: 1,
-                hour: Hours::H24(1),
-                minute: 0,
-            },
-            Alarm2Matching::OncePerMinute,
-        )
-        .unwrap();
+            // alarm1 used to track events
+            // alarm2 used to refresh clock display every minute.
+            rtc.enable_alarm1_interrupts().unwrap();
+            rtc.enable_alarm2_interrupts().unwrap();
 
-        let time = rtc.get_time().unwrap();
-        refresh_time::spawn(time, false).unwrap();
-        refresh_bme680::spawn(false).unwrap();
+            rtc.set_alarm2_day(
+                DayAlarm2 {
+                    day: 1,
+                    hour: Hours::H24(1),
+                    minute: 0,
+                },
+                Alarm2Matching::OncePerMinute,
+            )
+            .unwrap();
 
-        let ranges = [
-            TimeRange {
-                start: time
-                    .overflowing_add_signed(chrono::Duration::seconds(60 * 1))
-                    .0,
-                end: time
-                    .overflowing_add_signed(chrono::Duration::seconds(60 * 2))
-                    .0,
+            let time = rtc.get_time().unwrap();
+            refresh_time::spawn(time, false).unwrap();
 
-                // start: NaiveTime::from_hms(0, 0, 0),
-                // end: NaiveTime::from_hms(5, 0, 0),
-                in_color: colors::RED,
-                name: "0:0->5:0",
-            },
-            TimeRange {
-                start: time
-                    .overflowing_add_signed(chrono::Duration::seconds(60 * 3))
-                    .0,
-                end: time
-                    .overflowing_add_signed(chrono::Duration::seconds(60 * 4))
-                    .0,
+            #[cfg(feature = "testranges")]
+            {
+                ranges = [
+                    TimeRange {
+                        start: time
+                            .overflowing_add_signed(chrono::Duration::seconds(60 * 1))
+                            .0,
+                        end: time
+                            .overflowing_add_signed(chrono::Duration::seconds(60 * 2))
+                            .0,
 
-                // start: NaiveTime::from_hms(5, 1, 0),
-                // end: NaiveTime::from_hms(7, 0, 0),
-                in_color: colors::GREEN,
-                name: "5:1->7:0",
-            },
-            TimeRange {
-                start: time
-                    .overflowing_add_signed(chrono::Duration::seconds(60 * 5))
-                    .0,
-                end: time
-                    .overflowing_add_signed(chrono::Duration::seconds(60 * 6))
-                    .0,
+                        // start: NaiveTime::from_hms(0, 0, 0),
+                        // end: NaiveTime::from_hms(5, 0, 0),
+                        in_color: colors::RED,
+                        name: "0:0->5:0",
+                    },
+                    TimeRange {
+                        start: time
+                            .overflowing_add_signed(chrono::Duration::seconds(60 * 3))
+                            .0,
+                        end: time
+                            .overflowing_add_signed(chrono::Duration::seconds(60 * 4))
+                            .0,
 
-                // start: NaiveTime::from_hms(7, 1, 0),
-                // end: NaiveTime::from_hms(23, 59, 0),
-                in_color: colors::BLUE,
-                name: "7:1->23:59",
-            },
-        ];
+                        // start: NaiveTime::from_hms(5, 1, 0),
+                        // end: NaiveTime::from_hms(7, 0, 0),
+                        in_color: colors::GREEN,
+                        name: "5:1->7:0",
+                    },
+                ];
+            }
 
-        let mut state = FSMState::Idle;
-        let mut found = false;
-        let mut next_or_current_range = 0;
+            #[cfg(not(feature = "testranges"))]
+            {
+                ranges = [
+                    TimeRange {
+                        start: NaiveTime::from_hms(20, 0, 0),
+                        end: NaiveTime::from_hms(7, 30, 0),
+                        in_color: colors::PINK,
+                        name: "night",
+                    },
+                    TimeRange {
+                        start: NaiveTime::from_hms(14, 00, 0),
+                        end: NaiveTime::from_hms(16, 0, 0),
+                        in_color: colors::PINK,
+                        name: "nap",
+                    },
+                ];
+            }
+            state = FSMState::Idle;
+            let mut found = false;
+            next_or_current_range = 0;
 
-        for (i, range) in ranges.iter().enumerate() {
-            next_or_current_range = i;
+            let mut current_color = &IDLE_COLOR;
 
             debug_only! {
                 hprintln!(
-                    "Testing range #{}",
-                    i
+                    "Testing with time  #{:?}",
+                    time
                 ).unwrap()
             }
 
-            if time < range.start {
-                state = FSMState::WaitNextRange(i);
+            for (i, range) in ranges.iter().enumerate() {
+                next_or_current_range = i;
+
                 debug_only! {
                     hprintln!(
-                        "Waiting for next range to activate: {} -> {}",
+                        "Testing range #{}:  {} -> {}",
+                        i,
                         range.start,
                         range.end
                     ).unwrap()
                 }
 
-                rtc.set_alarm1_hms(range.start).unwrap();
-                found = true;
-                break;
+                if time < range.start {
+                    state = FSMState::WaitNextRange(i);
+                    debug_only! {
+                        hprintln!(
+                            "Waiting for next range to activate: {} -> {}",
+                            range.start,
+                            range.end
+                        ).unwrap()
+                    }
+
+                    rtc.set_alarm1_hms(range.start).unwrap();
+                    found = true;
+                    break;
+                }
+
+                transition_leds::spawn(colors::GREEN, 50).unwrap();
+
+                if time >= range.start && time < range.end {
+                    state = FSMState::InRange(i);
+                    debug_only! {hprintln!("In range: {}:{}", range.start, range.end).unwrap()}
+
+                    transition_leds::spawn(range.in_color, 50).unwrap();
+
+                    rtc.set_alarm1_hms(range.end).unwrap();
+
+                    found = true;
+                    break;
+                }
             }
 
-            transition_leds::spawn(colors::GREEN, 50).unwrap();
+            if !found {
+                next_or_current_range = 0;
 
-            if time >= range.start && time < range.end {
-                state = FSMState::InRange(i);
-                debug_only! {hprintln!("In range: {}:{}", range.start, range.end).unwrap()}
-
-                transition_leds::spawn(range.in_color, 50).unwrap();
-
-                rtc.set_alarm1_hms(range.end).unwrap();
-
-                found = true;
-                break;
+                debug_only! {hprintln!(
+                    "Next alarm is tomorrow: {}:{}",
+                    ranges[0].start,
+                    ranges[0].end
+                )
+                             .unwrap()}
+                rtc.set_alarm1_hms(ranges[0].start).unwrap();
             }
+
+            #[cfg(feature = "epd")]
+            epd.update_and_display_frame(&mut spi0, &display.buffer())
+                .unwrap();
+
+            // enable partial refresh from now on
+            #[cfg(feature = "epd")]
+            epd.set_refresh(&mut spi0, &mut delay, RefreshLUT::QUICK)
+                .unwrap();
         }
 
-        if !found {
-            next_or_current_range = 0;
+        #[cfg(feature = "bme")]
+        refresh_bme680::spawn(false).unwrap();
 
-            debug_only! {hprintln!(
-                "Next alarm is tomorrow: {}:{}",
-                ranges[0].start,
-                ranges[0].end
-            )
-                         .unwrap()}
-            rtc.set_alarm1_hms(ranges[0].start).unwrap();
+        let is_rot_switch_pressed = rotary_pin.is_low().unwrap();
+        let rotary_switch = RotarySwitchT::new(rotary_pin, is_rot_switch_pressed);
+
+        debug_only! {
+            hprintln!("init switch {:?}", is_rot_switch_pressed).unwrap()
         }
-
-        epd.update_and_display_frame(&mut spi0, &display.buffer())
-            .unwrap();
-
-        // enable partial refresh from now on
-        epd.set_refresh(&mut spi0, &mut delay, RefreshLUT::QUICK)
-            .unwrap();
-
-        let rotary_pin = portb.pb7.into_pull_up_input();
-        let init_state = rotary_pin.is_high().unwrap();
-        let rotary_switch = RotarySwitchT::new(rotary_pin, init_state);
 
         // switch is using PUR, is_low() <=> pressed <=> 'true' state
         let toggle_pin = portb.pb5.into_pull_up_input();
@@ -660,25 +723,39 @@ mod app {
             mode: OperatingMode::Normal,
             submode: SubConfig::Hour,
 
+            #[cfg(feature = "rtc")]
             rtc,
+
+            #[cfg(feature = "epd")]
             screen: Screen {
                 epd,
                 spi: spi0,
                 delay,
                 quick_refresh_count: 0,
             },
+
             display,
 
+            #[cfg(feature = "rtc")]
             rtc_int_pin,
+
             leds,
             leds_data: [colors::BLACK; NUM_LEDS],
 
+            #[cfg(feature = "bme")]
             bme680,
 
+            #[cfg(feature = "rtc")]
             ranges,
+
+            #[cfg(feature = "rtc")]
             next_or_current_range,
+
+            #[cfg(feature = "rtc")]
             state,
             rotary,
+
+            #[cfg(feature = "rtc")]
             new_time: NaiveTime::from_hms(0, 0, 0),
 
             i2c_error: 0,
@@ -694,10 +771,13 @@ mod app {
     // relying on the naive Delay implementation counting some nop. If they are
     // interrupted, timing will be incorrect.
 
+    #[cfg(feature = "epd")]
     #[task(priority = 5, resources = [screen, display])]
-    fn refresh_epd(cx: refresh_epd::Context) {
+    fn refresh_epd(cx: refresh_epd::Context, mode_hint: EPDModeHint) {
         (cx.resources.screen, cx.resources.display).lock(|screen, display| {
-            let do_full_refresh = screen.quick_refresh_count > MAX_NUM_QUICK_REFRESH;
+            let do_full_refresh = (screen.quick_refresh_count > MAX_NUM_QUICK_REFRESH
+                && mode_hint != EPDModeHint::ForcePartial)
+                || mode_hint == EPDModeHint::ForceFull;
 
             let mut errcnt_s: String<U5> = String::new();
             uwrite!(errcnt_s, "#{}", screen.quick_refresh_count).unwrap();
@@ -736,6 +816,7 @@ mod app {
         });
     }
 
+    #[cfg(feature = "bme")]
     #[task(priority = 5, resources = [display, bme680, i2c_error])]
     fn refresh_bme680(cx: refresh_bme680::Context, refresh_epd: bool) {
         (cx.resources.bme680, cx.resources.i2c_error, cx.resources.display ).lock(|bme680, i2c_error, display| {
@@ -830,11 +911,10 @@ mod app {
                 .draw(display);
         });
         if refresh_epd {
-            refresh_epd::spawn().unwrap();
+            #[cfg(feature = "epd")]
+            refresh_epd::spawn(EPDModeHint::None).unwrap();
         }
-
     }
-
 
     // Priority 4 tasks
     //
@@ -859,50 +939,53 @@ mod app {
         }
 
         match mode {
-           OperatingMode::Normal => {
+            OperatingMode::Normal => {
                 ctx.resources.display.lock(|mut display| {
                     draw_config_hint(&mut display, false);
                 });
 
-               let copy_new_time = ctx.resources.new_time.lock(|t| *t);
-               ctx.resources.rtc.lock(|rtc| {
-                   rtc.set_time(&copy_new_time).unwrap();
-                   rtc.clear_alarm2_matched_flag().unwrap();
-                   rtc.clear_alarm1_matched_flag().unwrap();
-               });
+                #[cfg(feature = "rtc")]
+                {
+                    let copy_new_time = ctx.resources.new_time.lock(|t| *t);
+                    ctx.resources.rtc.lock(|rtc| {
+                        rtc.set_time(&copy_new_time).unwrap();
+                        rtc.clear_alarm2_matched_flag().unwrap();
+                        rtc.clear_alarm1_matched_flag().unwrap();
+                    });
 
-                // Monitor alarms from RTC
-                ctx.resources.rtc_int_pin.lock(|p| {
-                    p.clear_interrupt();
-                    p.set_interrupt_mode(InterruptMode::EdgeFalling);
-                });
-
+                    // Monitor alarms from RTC
+                    ctx.resources.rtc_int_pin.lock(|p| {
+                        p.clear_interrupt();
+                        p.set_interrupt_mode(InterruptMode::EdgeFalling);
+                    });
+                }
                 // Disable anything comming from rotary switch
                 // ctx.resources.rotary_switch.lock(|rs| {
                 //     rs.pin.set_interrupt_mode(InterruptMode::Disabled);
                 // });
-
             }
             OperatingMode::Configuration => {
-                let cur_time = ctx.resources.rtc.lock(|rtc| rtc.get_time().unwrap());
-                ctx.resources.new_time.lock(|t| {
-                    *t = cur_time;
-                });
+                #[cfg(feature = "rtc")]
+                {
+                    let cur_time = ctx.resources.rtc.lock(|rtc| rtc.get_time().unwrap());
+                    ctx.resources.new_time.lock(|t| {
+                        *t = cur_time;
+                    });
 
-                ctx.resources.display.lock(|display| {
-                    draw_config_hint(display, true);
-                });
+                    ctx.resources.display.lock(|display| {
+                        draw_config_hint(display, true);
+                    });
+                    // Do not monitor alarms from RTC
+                    ctx.resources
+                        .rtc_int_pin
+                        .lock(|p| p.set_interrupt_mode(InterruptMode::Disabled));
+                }
                 rotary_sampling::spawn(true).unwrap();
-
-                // Do not monitor alarms from RTC
-                ctx.resources
-                    .rtc_int_pin
-                    .lock(|p| p.set_interrupt_mode(InterruptMode::Disabled));
+                refresh_during_configuration::spawn().unwrap();
             }
         }
         //        refresh_epd::spawn().unwrap();
     }
-
 
     #[task(priority = 4, binds = GPIOB, resources = [toggle_switch])]
     fn gpiob(mut cx: gpiob::Context) {
@@ -924,6 +1007,7 @@ mod app {
         });
     }
 
+    #[cfg(feature = "rtc")]
     #[task(priority = 4, binds = GPIOD, resources = [rtc, mode, rtc_int_pin])]
     fn gpiod(mut cx: gpiod::Context) {
         let mut a1 = false;
@@ -952,10 +1036,14 @@ mod app {
             .mode
             .lock(|mode| a2 && *mode == OperatingMode::Normal)
         {
+            #[cfg(feature = "bme")]
             refresh_bme680::spawn(false).unwrap();
+
+            #[cfg(feature = "rtc")]
             refresh_time::spawn(time, false).unwrap();
         }
-        refresh_epd::spawn().unwrap();
+        #[cfg(feature = "epd")]
+        refresh_epd::spawn(EPDModeHint::None).unwrap();
 
         debug_only! {hprintln!("hep").unwrap()}
     }
@@ -964,6 +1052,30 @@ mod app {
     //
     // These are not really critical and can afford being preempted.
     // Mostly the polling tasks.
+
+    #[task(
+        priority = 3,
+        resources = [mode, new_time],
+    )]
+    fn refresh_during_configuration(mut ctx: refresh_during_configuration::Context) {
+        let scheduled = Instant::now(); // ctx.scheduled;
+
+        #[cfg(feature = "rtc")]
+        let newtime = ctx.resources.new_time.lock(|nt| *nt);
+
+        ctx.resources.mode.lock(|mode| {
+            if *mode == OperatingMode::Configuration {
+                #[cfg(feature = "rtc")]
+                refresh_time::spawn(newtime, false).unwrap();
+
+                refresh_during_configuration::schedule(scheduled + (2 * ONE_SEC).cycles()).unwrap();
+
+                #[cfg(feature = "epd")]
+                refresh_epd::spawn(EPDModeHint::ForcePartial).unwrap();
+            }
+        });
+    }
+
     #[task(
         priority = 3,
         resources = [mode, toggle_switch],
@@ -1000,23 +1112,22 @@ mod app {
             }
         });
     }
+
+    #[cfg(feature = "rtc")]
     #[task(priority = 3, resources = [rtc, ranges, state, next_or_current_range])]
     fn handle_event_alarm(cx: handle_event_alarm::Context) {
         debug_only! {hprintln!("handle event alarm!").unwrap()}
 
-        (cx.resources.state, cx.resources.ranges , cx.resources.rtc).lock(|state, ranges, rtc| {
+        (cx.resources.state, cx.resources.ranges, cx.resources.rtc).lock(|state, ranges, rtc| {
             let ns = match state {
                 FSMState::Idle => None,
                 FSMState::WaitNextRange(ref range) => {
                     debug_only! {hprintln!("Enter").unwrap()}
 
-                    transition_leds::spawn(ranges[*range].in_color, TRANSITION_STEPS)
-                        .unwrap();
+                    transition_leds::spawn(ranges[*range].in_color, TRANSITION_STEPS).unwrap();
 
                     debug_only! {hprintln!("Alarm :{}", ranges[*range].end).unwrap()}
-                        rtc
-                        .set_alarm1_hms(ranges[*range].end)
-                        .unwrap();
+                    rtc.set_alarm1_hms(ranges[*range].end).unwrap();
 
                     Some(FSMState::InRange(*range))
                 }
@@ -1027,14 +1138,10 @@ mod app {
                     transition_leds::spawn(colors::GREEN, 50).unwrap();
 
                     if *range == ranges.len() - 1 {
-                            rtc
-                            .set_alarm1_hms(ranges[0].start)
-                            .unwrap();
+                        rtc.set_alarm1_hms(ranges[0].start).unwrap();
                         Some(FSMState::WaitNextRange(0))
                     } else {
-                            rtc
-                            .set_alarm1_hms(ranges[*range + 1].start)
-                            .unwrap();
+                        rtc.set_alarm1_hms(ranges[*range + 1].start).unwrap();
                         Some(FSMState::WaitNextRange(*range + 1))
                     }
                 }
@@ -1045,7 +1152,6 @@ mod app {
             }
         });
     }
-
 
     #[task(priority = 3, capacity = 2, resources = [display])]
     fn refresh_time(mut cx: refresh_time::Context, time: NaiveTime, refresh_epd: bool) {
@@ -1075,25 +1181,29 @@ mod app {
         });
 
         if refresh_epd {
-            refresh_epd::spawn().unwrap();
+            #[cfg(feature = "epd")]
+            refresh_epd::spawn(EPDModeHint::None).unwrap();
         }
     }
 
     #[task(priority = 3,
            resources =[mode, submode, rotary, rotary_switch, new_time])]
-    fn rotary_sampling(cx: rotary_sampling::Context, first: bool) {
+    fn rotary_sampling(mut cx: rotary_sampling::Context, first: bool) {
         if first {
             debug_only! {hprintln!("rotary sampling").unwrap()}
         }
-        let scheduled = Instant::now() ; //cx.scheduled;
+        let scheduled = Instant::now(); //cx.scheduled;
+
+        #[cfg(feature = "rtc")]
+        let mut new_time = cx.resources.new_time.lock(|t| *t);
+
         (
             cx.resources.mode,
             cx.resources.submode,
             cx.resources.rotary_switch,
             cx.resources.rotary,
-            cx.resources.new_time,
         )
-            .lock(|mode, submode, rs, r, new_time| {
+            .lock(|mode, submode, rs, r| {
                 let current_mode = *mode;
 
                 match current_mode {
@@ -1114,24 +1224,27 @@ mod app {
                                 };
 
                                 let add = match *submode {
-                                    SubConfig::Hour => chrono::Duration::hours(1*sign),
-                                    SubConfig::Minute => chrono::Duration::minutes(1*sign),
+                                    SubConfig::Hour => chrono::Duration::hours(1 * sign),
+                                    SubConfig::Minute => chrono::Duration::minutes(1 * sign),
                                 };
 
-                                *new_time = new_time
-                                    .overflowing_add_signed(add)
-                                    .0;
+                                #[cfg(feature = "rtc")]
+                                {
+                                    new_time = new_time.overflowing_add_signed(add).0;
+                                }
 
-                                // Should be quick as EDP in partial refresh during configuration.
-                                refresh_time::spawn(*new_time, true).unwrap();
+                                debug_only! {hprintln!("knob turned").unwrap()}
+                                // Should be quick as EPD in partial refresh during configuration.
+                                // refresh_time::spawn(*new_time, false).unwrap();
                             }
                             Direction::None => {}
                         }
 
                         // Refresh switch and maybe spawn handler
                         let pressed: bool = rs.pin.is_low().unwrap();
-                        let edge = rs.debouncer.update(pressed);
 
+                        let edge = rs.debouncer.update(pressed);
+//                        debug_only! {hprintln!("rotary switch status {:?}", pressed).unwrap()}
                         // Dispatch event
                         if edge == Some(Edge::Rising) {
                             debug_only! {hprintln!("rotary PRESSED").unwrap()}
@@ -1152,6 +1265,9 @@ mod app {
                     }
                 }
             });
+
+        #[cfg(feature = "rtc")]
+        cx.resources.new_time.lock(|t| *t = new_time);
     }
 
     // Priority 1 tasks.
@@ -1221,7 +1337,6 @@ mod app {
     //     refresh_leds::spawn().unwrap();
     // }
 
-
     // #[task(capacity = 10, priority = 1, resources =[rtc, new_time, submode])]
     // fn knob_turned(cx: knob_turned::Context, dir: Direction) {
     //     (cx.resources.submode, cx.resources.new_time).lock(|submode, new_time| {
@@ -1229,7 +1344,6 @@ mod app {
 
     //     });
     // }
-
 }
 
 fn draw_config_hint(display: &mut Display2in13, is_config: bool) {

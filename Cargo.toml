@@ -83,3 +83,7 @@ default = [ ]
 
 ## This will use semihosting for printing debug trace.
 usesemihosting = [ "default" ]
+epd = ["default"]
+bme = ["default"]
+rtc = ["default"]
+testranges = ["default"]

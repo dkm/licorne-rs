@@ -33,6 +33,9 @@ use embedded_graphics::{
 
 use epd_waveshare::epd2in13_v2::{Display2in13, EPD2in13};
 
+use smart_leds::{colors, RGB8};
+
+const IDLE_COLOR: RGB8 = colors::GREEN;
 const NUM_LEDS: usize = 3;
 
 const FONT_TIME: embedded_various_fonts::fonts::GNUTypeWriter60Point =
@@ -142,9 +145,11 @@ use tm4c123x_hal::{
 use drogue_bme680::{Bme680Controller, StaticProvider};
 
 use debouncr::{debounce_stateful_12, DebouncerStateful, Repeat12};
-use smart_leds::RGB8;
 
 use rotary_encoder_hal::Rotary;
+
+use ws2812_spi as ws2812;
+
 // Specialized types for our particular setup.
 
 // i2c for DS3231 RTC
@@ -225,6 +230,7 @@ pub enum FSMState {
 pub enum SubConfig {
     Hour,
     Minute,
+    Brightness,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -233,7 +239,7 @@ pub enum OperatingMode {
     Configuration,
 }
 
-const MAX_NUM_QUICK_REFRESH: u32 = 0;
+const MAX_NUM_QUICK_REFRESH: u32 = 200;
 
 pub struct Screen {
     epd: EpdT,
@@ -264,6 +270,12 @@ where
     }
 }
 
+pub struct LedsT {
+    leds: ws2812::Ws2812<Spi1T>,
+    leds_data: [RGB8; NUM_LEDS],
+    brightness: u8,
+}
+
 type ToggleSwitchPinT = PB5<Input<PullUp>>;
 type ToggleSwitchT = Switch<ToggleSwitchPinT>;
 
@@ -274,11 +286,12 @@ type RotarySwitchT = Switch<RotarySwitchPinT>;
 mod app {
 
     use crate::{
-        draw_config_hint, Bme680T, EPDModeHint, FSMState, OperatingMode, RotarySwitchT, RotaryT,
-        RtcT, Screen, SimpleAsmDelay, Spi1T, SubConfig, TimeRange, ToggleSwitchT, FONT_RIGHT_BAR,
-        FONT_TIME, MAX_NUM_QUICK_REFRESH, NUM_LEDS, SCR_HOUR_X_OFF, SCR_HOUR_Y_OFF,
-        SCR_RIGHT_BAR_ERRCNT_X_OFF, SCR_RIGHT_BAR_ERRCNT_Y_OFF, SCR_RIGHT_BAR_HUMID_X_OFF,
-        SCR_RIGHT_BAR_HUMID_Y_OFF, SCR_RIGHT_BAR_TEMP_X_OFF, SCR_RIGHT_BAR_TEMP_Y_OFF,
+        draw_config_hint, Bme680T, EPDModeHint, FSMState, LedsT, OperatingMode, RotarySwitchT,
+        RotaryT, RtcT, Screen, SimpleAsmDelay, Spi1T, SubConfig, TimeRange, ToggleSwitchT,
+        FONT_RIGHT_BAR, FONT_TIME, IDLE_COLOR, MAX_NUM_QUICK_REFRESH, NUM_LEDS, SCR_HOUR_X_OFF,
+        SCR_HOUR_Y_OFF, SCR_RIGHT_BAR_ERRCNT_X_OFF, SCR_RIGHT_BAR_ERRCNT_Y_OFF,
+        SCR_RIGHT_BAR_HUMID_X_OFF, SCR_RIGHT_BAR_HUMID_Y_OFF, SCR_RIGHT_BAR_TEMP_X_OFF,
+        SCR_RIGHT_BAR_TEMP_Y_OFF,
     };
     use rtic::cyccnt::Instant;
 
@@ -320,7 +333,7 @@ mod app {
 
     use ds323x::{Alarm2Matching, DayAlarm2, Ds323x, Hours, NaiveTime, Rtcc, Timelike};
 
-    use smart_leds::{colors, SmartLedsWrite, RGB8};
+    use smart_leds::{brightness, colors, SmartLedsWrite, RGB8};
 
     use ws2812_spi as ws2812;
 
@@ -372,8 +385,7 @@ mod app {
         rtc_int_pin: PD6<Input<PullUp>>,
 
         // ws2812
-        leds: ws2812::Ws2812<Spi1T>,
-        leds_data: [RGB8; NUM_LEDS],
+        leds: LedsT,
 
         // temp & cov
         #[cfg(feature = "bme")]
@@ -649,7 +661,7 @@ mod app {
                     state = FSMState::InRange(i);
                     debug_only! {hprintln!("In range: {}:{}", range.start, range.end).unwrap()}
 
-                    transition_leds::spawn(range.in_color, 50).unwrap();
+                    current_color = &range.in_color;
 
                     rtc.set_alarm1_hms(range.end).unwrap();
 
@@ -657,6 +669,8 @@ mod app {
                     break;
                 }
             }
+
+            transition_leds::spawn(*current_color, 50).unwrap();
 
             if !found {
                 next_or_current_range = 0;
@@ -737,8 +751,11 @@ mod app {
             #[cfg(feature = "rtc")]
             rtc_int_pin,
 
-            leds,
-            leds_data: [colors::BLACK; NUM_LEDS],
+            leds: LedsT {
+                leds,
+                leds_data: [colors::BLACK; NUM_LEDS],
+                brightness: 50,
+            },
 
             #[cfg(feature = "bme")]
             bme680,
@@ -1070,6 +1087,8 @@ mod app {
 
                 #[cfg(feature = "epd")]
                 refresh_epd::spawn(EPDModeHint::ForcePartial).unwrap();
+
+                refresh_leds::spawn().unwrap();
             }
         });
     }
@@ -1133,7 +1152,7 @@ mod app {
                 FSMState::InRange(ref range) => {
                     debug_only! {hprintln!("Exit").unwrap()}
 
-                    transition_leds::spawn(colors::GREEN, 50).unwrap();
+                    transition_leds::spawn(IDLE_COLOR, 50).unwrap();
 
                     if *range == ranges.len() - 1 {
                         rtc.set_alarm1_hms(ranges[0].start).unwrap();
@@ -1167,7 +1186,7 @@ mod app {
             )
             .unwrap();
 
-            debug_only! {hprintln!("refresh time with: {}", hhmm).unwrap()}
+            //            debug_only! {hprintln!("refresh time with: {}", hhmm).unwrap()}
 
             let _ = Text::new(&hhmm, Point::new(SCR_HOUR_X_OFF as i32, SCR_HOUR_Y_OFF))
                 .into_styled(text_style!(
@@ -1185,7 +1204,7 @@ mod app {
     }
 
     #[task(priority = 3,
-           resources =[mode, submode, rotary, rotary_switch, new_time])]
+           resources =[mode, submode, rotary, rotary_switch, new_time, leds])]
     fn rotary_sampling(mut cx: rotary_sampling::Context, first: bool) {
         if first {
             debug_only! {hprintln!("rotary sampling").unwrap()}
@@ -1194,6 +1213,7 @@ mod app {
 
         #[cfg(feature = "rtc")]
         let mut new_time = cx.resources.new_time.lock(|t| *t);
+        let mut new_brightness = cx.resources.leds.lock(|l| l.brightness);
 
         (
             cx.resources.mode,
@@ -1224,6 +1244,11 @@ mod app {
                                 let add = match *submode {
                                     SubConfig::Hour => chrono::Duration::hours(1 * sign),
                                     SubConfig::Minute => chrono::Duration::minutes(1 * sign),
+                                    SubConfig::Brightness => {
+                                        new_brightness =
+                                            (new_brightness as i8 + sign as i8 * 10) as u8;
+                                        chrono::Duration::minutes(0)
+                                    }
                                 };
 
                                 #[cfg(feature = "rtc")]
@@ -1250,7 +1275,8 @@ mod app {
                             debug_only! {hprintln!("rotary RELEASED").unwrap()}
                             *submode = match *submode {
                                 SubConfig::Hour => SubConfig::Minute,
-                                SubConfig::Minute => SubConfig::Hour,
+                                SubConfig::Minute => SubConfig::Brightness,
+                                SubConfig::Brightness => SubConfig::Hour,
                             };
                         }
 
@@ -1266,6 +1292,8 @@ mod app {
 
         #[cfg(feature = "rtc")]
         cx.resources.new_time.lock(|t| *t = new_time);
+
+        cx.resources.leds.lock(|l| l.brightness = new_brightness);
     }
 
     // Priority 1 tasks.
@@ -1274,11 +1302,11 @@ mod app {
     // should not break anything nor provide a bad feedback to the user.
     #[task(
         priority = 1,
-        resources = [leds_data],
+        resources = [leds],
     )]
     fn transition_leds(mut cx: transition_leds::Context, to: RGB8, trans_step: u32) {
-        cx.resources.leds_data.lock(|leds| {
-            for led in leds.iter_mut() {
+        cx.resources.leds.lock(|leds| {
+            for led in leds.leds_data.iter_mut() {
                 if trans_step > 1 {
                     let dr = to.r - led.r;
                     let dg = to.g - led.g;
@@ -1306,10 +1334,12 @@ mod app {
         refresh_leds::spawn().unwrap();
     }
 
-    #[task(priority = 1, resources = [leds, leds_data])]
-    fn refresh_leds(cx: refresh_leds::Context) {
-        (cx.resources.leds_data, cx.resources.leds).lock(|leds_data, leds| {
-            leds.write(leds_data.iter().cloned()).unwrap();
+    #[task(priority = 1, resources = [leds])]
+    fn refresh_leds(mut cx: refresh_leds::Context) {
+        cx.resources.leds.lock(|leds| {
+            leds.leds
+                .write(brightness(leds.leds_data.iter().cloned(), leds.brightness))
+                .unwrap();
         });
     }
 

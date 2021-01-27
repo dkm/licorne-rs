@@ -111,7 +111,7 @@ impl DelayUs<u8> for SimpleAsmDelay {
 // PB4: Rotary Encoder (pinB)
 // PB5: Toggle Switch (config mode)
 // PB6:
-// PB7: Rotary switch
+// PC4: Rotary switch
 //
 // PC6: GPIO [EPD-cs]
 //
@@ -127,7 +127,7 @@ impl DelayUs<u8> for SimpleAsmDelay {
 use ds323x::{Ds323x, NaiveTime};
 use tm4c123x_hal::{
     gpio::gpioa::{PA2, PA4, PA5, PA6, PA7},
-    gpio::gpiob::{PB1, PB2, PB3, PB4, PB5, PB7},
+    gpio::gpiob::{PB1, PB2, PB3, PB4, PB5},
     gpio::gpioc::{PC4, PC6},
     gpio::gpiod::{PD0, PD1, PD2, PD3},
     gpio::gpioe::{PE2, PE4},
@@ -645,9 +645,7 @@ mod app {
                     break;
                 }
 
-                transition_leds::spawn(colors::GREEN, 50).unwrap();
-
-                if time >= range.start && time < range.end {
+                if time >= range.start && (time < range.end || range.end < range.start) {
                     state = FSMState::InRange(i);
                     debug_only! {hprintln!("In range: {}:{}", range.start, range.end).unwrap()}
 

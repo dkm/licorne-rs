@@ -28,8 +28,8 @@ Wire Wire Line
 	4500 2400 4050 2400
 NoConn ~ 4500 3600
 NoConn ~ 4500 3400
-Text GLabel 4500 2300 0    50   Input ~ 0
-pb0_epd_busy
+Text GLabel 4500 3900 0    50   Input ~ 0
+pe2_epd_busy
 Text GLabel 4500 3500 0    50   Input ~ 0
 pd1_epd_rst
 Text GLabel 4500 2500 0    50   Input ~ 0
@@ -70,17 +70,6 @@ F 3 "" H 4350 2050 50  0001 C CNN
 	1    4350 2050
 	1    0    0    -1  
 $EndComp
-$Comp
-L Connector_Generic:Conn_02x05_Counter_Clockwise J2
-U 1 1 5FD12971
-P 2250 1800
-F 0 "J2" H 2300 2217 50  0000 C CNN
-F 1 "rotary_conn" H 2300 2126 50  0000 C CNN
-F 2 "Connector_IDC:IDC-Header_2x05_P2.54mm_Vertical" H 2250 1800 50  0001 C CNN
-F 3 "~" H 2250 1800 50  0001 C CNN
-	1    2250 1800
-	1    0    0    -1  
-$EndComp
 Text GLabel 4500 2700 0    50   Input ~ 0
 pb4_rotary_pb
 Text GLabel 2050 1600 0    50   Input ~ 0
@@ -89,17 +78,14 @@ Text GLabel 4050 2400 0    50   Input ~ 0
 pb1_rotary_pa
 Text GLabel 2050 1700 0    50   Input ~ 0
 pb1_rotary_pa
-Text GLabel 6100 2600 2    50   Input ~ 0
-pb7_rotary_switch
+Text GLabel 6100 3500 2    50   Input ~ 0
+pc4_rotary_switch
 Text GLabel 2050 1800 0    50   Input ~ 0
-pb7_rotary_switch
+pc4_rotary_switch
 Wire Wire Line
-	2050 1900 2050 2000
-Wire Wire Line
-	2050 2000 1800 2000
+	2050 2000 2000 2000
 Wire Wire Line
 	1800 2000 1800 2150
-Connection ~ 2050 2000
 $Comp
 L power:GND #PWR0104
 U 1 1 5FD203F3
@@ -115,7 +101,6 @@ NoConn ~ 2550 1600
 NoConn ~ 2550 1700
 NoConn ~ 2550 1800
 NoConn ~ 2550 1900
-NoConn ~ 2550 2000
 Text GLabel 6100 3000 2    50   Input ~ 0
 pa2_ssi0_mosi
 Text GLabel 8300 3000 2    50   Input ~ 0
@@ -125,7 +110,7 @@ pa2_ssi0_sck
 Text GLabel 8300 3100 2    50   Input ~ 0
 pa2_ssi0_sck
 Text GLabel 8300 3200 2    50   Input ~ 0
-pb0_epd_busy
+pe2_epd_busy
 Text GLabel 6100 3700 2    50   Input ~ 0
 pc6_epd_cs
 Text GLabel 8300 3300 2    50   Input ~ 0
@@ -201,9 +186,9 @@ pa6_i2c1_bme680_scl
 Text GLabel 2100 3200 2    50   Input ~ 0
 pa6_i2c1_bme680_scl
 Text GLabel 4500 3000 0    50   Input ~ 0
-pa6_i2c1_bme680_sda
+pa7_i2c1_bme680_sda
 Text GLabel 2100 3300 2    50   Input ~ 0
-pa6_i2c1_bme680_sda
+pa7_i2c1_bme680_sda
 Wire Wire Line
 	1600 3400 1600 3300
 Connection ~ 1600 3300
@@ -394,7 +379,6 @@ F 3 "" H 4150 3300 50  0001 C CNN
 	1    0    0    -1  
 $EndComp
 NoConn ~ 4500 3800
-NoConn ~ 4500 3900
 NoConn ~ 4500 4000
 NoConn ~ 4500 4100
 NoConn ~ 6100 2300
@@ -403,7 +387,6 @@ NoConn ~ 6100 2700
 NoConn ~ 6100 2900
 NoConn ~ 6100 3200
 NoConn ~ 6100 3300
-NoConn ~ 6100 3500
 NoConn ~ 6100 3600
 NoConn ~ 6100 3800
 NoConn ~ 6100 4000
@@ -460,4 +443,26 @@ Connection ~ 4500 3300
 Wire Wire Line
 	5450 2100 6100 2100
 Connection ~ 6100 2100
+NoConn ~ 4500 2300
+$Comp
+L Connector_Generic:Conn_02x05_Counter_Clockwise J2
+U 1 1 5FD12971
+P 2250 1800
+F 0 "J2" H 2300 2217 50  0000 C CNN
+F 1 "rotary_conn" H 2300 2126 50  0000 C CNN
+F 2 "Connector_IDC:IDC-Header_2x05_P2.54mm_Vertical" H 2250 1800 50  0001 C CNN
+F 3 "~" H 2250 1800 50  0001 C CNN
+	1    2250 1800
+	1    0    0    -1  
+$EndComp
+NoConn ~ 2050 1900
+Wire Wire Line
+	2550 2000 2550 2150
+Wire Wire Line
+	2550 2150 2000 2150
+Wire Wire Line
+	2000 2150 2000 2000
+Connection ~ 2000 2000
+Wire Wire Line
+	2000 2000 1800 2000
 $EndSCHEMATC

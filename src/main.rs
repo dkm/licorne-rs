@@ -35,6 +35,7 @@ use epd_waveshare::epd2in13_v2::{Display2in13, EPD2in13};
 
 use smart_leds::{colors, RGB8};
 
+const RESET_BRIGHTNESS_VALUE: u8 = 30u8;
 const IDLE_COLOR: RGB8 = colors::GREEN;
 const NUM_LEDS: usize = 3;
 
@@ -101,6 +102,10 @@ impl DelayUs<u8> for SimpleAsmDelay {
         self.delay_us(cast::u32(us))
     }
 }
+
+// Beware that PB7/PD1 and PB6/PD0 pairs are connected by a 0-ohm resistor
+// You need to unsolder these R if you want to use both pins in a pair.
+//
 // PA2: SSI0 [epd]
 // PA4: SSI0 [epd unconnected]
 // PA5: SSI0 [epd]
@@ -287,9 +292,9 @@ mod app {
 
     use crate::{
         draw_config_hint, Bme680T, EPDModeHint, FSMState, LedsT, OperatingMode, RotarySwitchT,
-        RotaryT, RtcT, Screen, SimpleAsmDelay, Spi1T, SubConfig, TimeRange, ToggleSwitchT,
-        FONT_RIGHT_BAR, FONT_TIME, IDLE_COLOR, MAX_NUM_QUICK_REFRESH, NUM_LEDS, SCR_HOUR_X_OFF,
-        SCR_HOUR_Y_OFF, SCR_RIGHT_BAR_ERRCNT_X_OFF, SCR_RIGHT_BAR_ERRCNT_Y_OFF,
+        RotaryT, RtcT, Screen, SimpleAsmDelay, SubConfig, TimeRange, ToggleSwitchT, FONT_RIGHT_BAR,
+        FONT_TIME, IDLE_COLOR, MAX_NUM_QUICK_REFRESH, NUM_LEDS, RESET_BRIGHTNESS_VALUE,
+        SCR_HOUR_X_OFF, SCR_HOUR_Y_OFF, SCR_RIGHT_BAR_ERRCNT_X_OFF, SCR_RIGHT_BAR_ERRCNT_Y_OFF,
         SCR_RIGHT_BAR_HUMID_X_OFF, SCR_RIGHT_BAR_HUMID_Y_OFF, SCR_RIGHT_BAR_TEMP_X_OFF,
         SCR_RIGHT_BAR_TEMP_Y_OFF,
     };
@@ -642,7 +647,7 @@ mod app {
                     ).unwrap()
                 }
 
-                if time < range.start {
+                if time < range.start && range.start < range.end {
                     state = FSMState::WaitNextRange(i);
                     debug_only! {
                         hprintln!(
@@ -657,7 +662,9 @@ mod app {
                     break;
                 }
 
-                if time >= range.start && (time < range.end || range.end < range.start) {
+                if (range.start <= time && (time < range.end || range.end < range.start))
+                    || (time <= range.end && range.start > range.end)
+                {
                     state = FSMState::InRange(i);
                     debug_only! {hprintln!("In range: {}:{}", range.start, range.end).unwrap()}
 
@@ -754,7 +761,7 @@ mod app {
             leds: LedsT {
                 leds,
                 leds_data: [colors::BLACK; NUM_LEDS],
-                brightness: 50,
+                brightness: RESET_BRIGHTNESS_VALUE,
             },
 
             #[cfg(feature = "bme")]
@@ -1234,7 +1241,7 @@ mod app {
                         let dir = r.update().unwrap();
                         match dir {
                             Direction::Clockwise | Direction::CounterClockwise => {
-//                                knob_turned::spawn(dir).unwrap();
+                                //                                knob_turned::spawn(dir).unwrap();
                                 let sign = match dir {
                                     Direction::Clockwise => 1,
                                     Direction::CounterClockwise => -1,
@@ -1267,7 +1274,7 @@ mod app {
                         let pressed: bool = rs.pin.is_low().unwrap();
 
                         let edge = rs.debouncer.update(pressed);
-//                        debug_only! {hprintln!("rotary switch status {:?}", pressed).unwrap()}
+                        //                        debug_only! {hprintln!("rotary switch status {:?}", pressed).unwrap()}
                         // Dispatch event
                         if edge == Some(Edge::Rising) {
                             debug_only! {hprintln!("rotary PRESSED").unwrap()}

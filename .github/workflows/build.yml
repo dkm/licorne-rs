@@ -25,19 +25,19 @@ jobs:
         with:
           use-cross: true
           command: build
-          args: --release --target=${{ matrix.target }}
+          args: --release --target=${{ matrix.target }} --features=rtc
       - uses: actions-rs/cargo@v1
         with:
           use-cross: true
           command: build
-          args: --release --target=${{ matrix.target }} --features=usedrogue
+          args: --release --target=${{ matrix.target }} --features=rtc,epd
       - uses: actions-rs/cargo@v1
         with:
           use-cross: true
           command: build
-          args: --release --target=${{ matrix.target }} --features=usesemihosting,usedrogue
+          args: --release --target=${{ matrix.target }} --features=rtc,epd,bme
       - uses: actions-rs/cargo@v1
         with:
           use-cross: true
           command: build
-          args: --release --target=${{ matrix.target }} --features=usesemihosting
+          args: --release --target=${{ matrix.target }} --features=usesemihosting,rtc,epd,bme

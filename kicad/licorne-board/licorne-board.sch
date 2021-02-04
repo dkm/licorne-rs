@@ -141,109 +141,35 @@ Wire Wire Line
 Wire Wire Line
 	7250 3100 7250 2850
 $Comp
-L Connector_Generic:Conn_02x05_Counter_Clockwise J1
-U 1 1 5FD360E9
-P 1800 3400
-F 0 "J1" H 1850 3817 50  0000 C CNN
-F 1 "bme680_conn" H 1850 3726 50  0000 C CNN
-F 2 "Connector_IDC:IDC-Header_2x05_P2.54mm_Vertical" H 1800 3400 50  0001 C CNN
-F 3 "~" H 1800 3400 50  0001 C CNN
-	1    1800 3400
-	1    0    0    -1  
-$EndComp
-Wire Wire Line
-	1600 3200 1150 3200
-Wire Wire Line
-	1150 3200 1150 2950
-$Comp
 L power:+3.3V #PWR0105
 U 1 1 5FD37559
-P 1150 2950
-F 0 "#PWR0105" H 1150 2800 50  0001 C CNN
-F 1 "+3.3V" H 1165 3123 50  0000 C CNN
-F 2 "" H 1150 2950 50  0001 C CNN
-F 3 "" H 1150 2950 50  0001 C CNN
-	1    1150 2950
+P 2600 3850
+F 0 "#PWR0105" H 2600 3700 50  0001 C CNN
+F 1 "+3.3V" H 2615 4023 50  0000 C CNN
+F 2 "" H 2600 3850 50  0001 C CNN
+F 3 "" H 2600 3850 50  0001 C CNN
+	1    2600 3850
 	1    0    0    -1  
 $EndComp
-Wire Wire Line
-	1600 3300 950  3300
-Wire Wire Line
-	950  3300 950  3400
 $Comp
 L power:GND #PWR0106
 U 1 1 5FD37E4D
-P 950 3400
-F 0 "#PWR0106" H 950 3150 50  0001 C CNN
-F 1 "GND" H 955 3227 50  0000 C CNN
-F 2 "" H 950 3400 50  0001 C CNN
-F 3 "" H 950 3400 50  0001 C CNN
-	1    950  3400
+P 1800 4300
+F 0 "#PWR0106" H 1800 4050 50  0001 C CNN
+F 1 "GND" H 1805 4127 50  0000 C CNN
+F 2 "" H 1800 4300 50  0001 C CNN
+F 3 "" H 1800 4300 50  0001 C CNN
+	1    1800 4300
 	1    0    0    -1  
 $EndComp
 Text GLabel 4500 2900 0    50   Input ~ 0
 pa6_i2c1_bme680_scl
-Text GLabel 2100 3200 2    50   Input ~ 0
+Text GLabel 2600 4150 0    50   Input ~ 0
 pa6_i2c1_bme680_scl
 Text GLabel 4500 3000 0    50   Input ~ 0
 pa7_i2c1_bme680_sda
-Text GLabel 2100 3300 2    50   Input ~ 0
+Text GLabel 2600 4050 0    50   Input ~ 0
 pa7_i2c1_bme680_sda
-Wire Wire Line
-	1600 3400 1600 3300
-Connection ~ 1600 3300
-NoConn ~ 2100 3400
-NoConn ~ 2100 3500
-NoConn ~ 2100 3600
-NoConn ~ 1600 3600
-NoConn ~ 1600 3500
-$Comp
-L Connector_Generic:Conn_02x05_Counter_Clockwise J5
-U 1 1 5FD4427B
-P 7300 1850
-F 0 "J5" H 7350 2267 50  0000 C CNN
-F 1 "rtc_conn" H 7350 2176 50  0000 C CNN
-F 2 "Connector_IDC:IDC-Header_2x05_P2.54mm_Vertical" H 7300 1850 50  0001 C CNN
-F 3 "~" H 7300 1850 50  0001 C CNN
-	1    7300 1850
-	1    0    0    -1  
-$EndComp
-Text GLabel 7100 1650 0    50   Input ~ 0
-pb2_i2c0_rtc_scl
-Text GLabel 7100 1750 0    50   Input ~ 0
-pb3_i2c0_rtc_sda
-Wire Wire Line
-	7600 1650 8050 1650
-Wire Wire Line
-	8050 1650 8050 1450
-$Comp
-L power:+3.3V #PWR0107
-U 1 1 5FD45C2F
-P 8050 1450
-F 0 "#PWR0107" H 8050 1300 50  0001 C CNN
-F 1 "+3.3V" H 8065 1623 50  0000 C CNN
-F 2 "" H 8050 1450 50  0001 C CNN
-F 3 "" H 8050 1450 50  0001 C CNN
-	1    8050 1450
-	1    0    0    -1  
-$EndComp
-Wire Wire Line
-	7600 1750 8250 1750
-Wire Wire Line
-	8250 1750 8250 1850
-$Comp
-L power:GND #PWR0108
-U 1 1 5FD46773
-P 8250 1850
-F 0 "#PWR0108" H 8250 1600 50  0001 C CNN
-F 1 "GND" H 8255 1677 50  0000 C CNN
-F 2 "" H 8250 1850 50  0001 C CNN
-F 3 "" H 8250 1850 50  0001 C CNN
-	1    8250 1850
-	1    0    0    -1  
-$EndComp
-Text GLabel 7100 1850 0    50   Input ~ 0
-pd6_rtc_int_sqw
 Text GLabel 6100 2200 2    50   Input ~ 0
 pb2_i2c0_rtc_scl
 Text GLabel 6100 3400 2    50   Input ~ 0
@@ -303,15 +229,15 @@ NoConn ~ 3800 1300
 NoConn ~ 3800 1200
 NoConn ~ 3800 1100
 $Comp
-L Connector:Conn_01x02_Male J3
+L Connector_Generic:Conn_02x05_Counter_Clockwise J3
 U 1 1 5FD5974D
-P 3200 1750
-F 0 "J3" H 3308 1931 50  0000 C CNN
-F 1 "toggle_conn" H 3308 1840 50  0000 C CNN
-F 2 "Connector_IDC:IDC-Header_2x05_P2.54mm_Vertical" H 3200 1750 50  0001 C CNN
-F 3 "~" H 3200 1750 50  0001 C CNN
-	1    3200 1750
-	1    0    0    -1  
+P 3200 1650
+F 0 "J3" H 3308 1831 50  0000 C CNN
+F 1 "toggle_conn" H 3308 1740 50  0000 C CNN
+F 2 "Connector_IDC:IDC-Header_2x05_P2.54mm_Vertical" H 3200 1650 50  0001 C CNN
+F 3 "~" H 3200 1650 50  0001 C CNN
+	1    3200 1650
+	-1   0    0    1   
 $EndComp
 Wire Wire Line
 	4500 2200 3800 2200
@@ -424,11 +350,6 @@ $EndComp
 Connection ~ 6200 1550
 Wire Wire Line
 	6200 1550 6300 1550
-NoConn ~ 7100 1950
-NoConn ~ 7100 2050
-NoConn ~ 7600 2050
-NoConn ~ 7600 1950
-NoConn ~ 7600 1850
 NoConn ~ 6100 2500
 NoConn ~ 4500 2600
 Wire Wire Line
@@ -465,4 +386,77 @@ Wire Wire Line
 Connection ~ 2000 2000
 Wire Wire Line
 	2000 2000 1800 2000
+Text GLabel 7100 950  0    50   Input ~ 0
+pd6_rtc_int_sqw
+$Comp
+L power:GND #PWR0108
+U 1 1 5FD46773
+P 7100 1150
+F 0 "#PWR0108" H 7100 900 50  0001 C CNN
+F 1 "GND" H 7105 977 50  0000 C CNN
+F 2 "" H 7100 1150 50  0001 C CNN
+F 3 "" H 7100 1150 50  0001 C CNN
+	1    7100 1150
+	1    0    0    -1  
+$EndComp
+$Comp
+L power:+3.3V #PWR0107
+U 1 1 5FD45C2F
+P 6200 600
+F 0 "#PWR0107" H 6200 450 50  0001 C CNN
+F 1 "+3.3V" H 6215 773 50  0000 C CNN
+F 2 "" H 6200 600 50  0001 C CNN
+F 3 "" H 6200 600 50  0001 C CNN
+	1    6200 600 
+	1    0    0    -1  
+$EndComp
+Text GLabel 7100 850  0    50   Input ~ 0
+pb3_i2c0_rtc_sda
+Text GLabel 7100 750  0    50   Input ~ 0
+pb2_i2c0_rtc_scl
+$Comp
+L Connector_Generic:Conn_01x06 J5
+U 1 1 601E28B5
+P 7300 850
+F 0 "J5" H 7380 842 50  0000 L CNN
+F 1 "RTC" H 7380 751 50  0000 L CNN
+F 2 "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical" H 7300 850 50  0001 C CNN
+F 3 "~" H 7300 850 50  0001 C CNN
+	1    7300 850 
+	1    0    0    -1  
+$EndComp
+Wire Wire Line
+	7100 650  6200 650 
+Wire Wire Line
+	6200 650  6200 600 
+$Comp
+L Connector_Generic:Conn_01x06 J1
+U 1 1 6020DB75
+P 2800 4050
+F 0 "J1" H 2880 4042 50  0000 L CNN
+F 1 "BME680" H 2880 3951 50  0000 L CNN
+F 2 "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical" H 2800 4050 50  0001 C CNN
+F 3 "~" H 2800 4050 50  0001 C CNN
+	1    2800 4050
+	1    0    0    -1  
+$EndComp
+Wire Wire Line
+	1800 4300 2300 4300
+Wire Wire Line
+	2300 4300 2300 4550
+NoConn ~ 2600 4250
+NoConn ~ 7100 1050
+NoConn ~ 2600 3950
+Wire Wire Line
+	2600 4350 2600 4550
+Wire Wire Line
+	2300 4550 2600 4550
+NoConn ~ 2900 1450
+NoConn ~ 2900 1550
+NoConn ~ 2900 1650
+NoConn ~ 2900 1750
+NoConn ~ 2900 1850
+NoConn ~ 3400 1550
+NoConn ~ 3400 1650
+NoConn ~ 3400 1450
 $EndSCHEMATC

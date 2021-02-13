@@ -106,9 +106,9 @@ pa2_ssi0_mosi
 Text GLabel 8300 3000 2    50   Input ~ 0
 pa2_ssi0_mosi
 Text GLabel 4500 2800 0    50   Input ~ 0
-pa2_ssi0_sck
+pa5_ssi0_sck
 Text GLabel 8300 3100 2    50   Input ~ 0
-pa2_ssi0_sck
+pa5_ssi0_sck
 Text GLabel 8300 3200 2    50   Input ~ 0
 pe2_epd_busy
 Text GLabel 6100 3700 2    50   Input ~ 0
@@ -154,21 +154,21 @@ $EndComp
 $Comp
 L power:GND #PWR0106
 U 1 1 5FD37E4D
-P 1800 4300
-F 0 "#PWR0106" H 1800 4050 50  0001 C CNN
-F 1 "GND" H 1805 4127 50  0000 C CNN
-F 2 "" H 1800 4300 50  0001 C CNN
-F 3 "" H 1800 4300 50  0001 C CNN
-	1    1800 4300
+P 1800 3650
+F 0 "#PWR0106" H 1800 3400 50  0001 C CNN
+F 1 "GND" H 1805 3477 50  0000 C CNN
+F 2 "" H 1800 3650 50  0001 C CNN
+F 3 "" H 1800 3650 50  0001 C CNN
+	1    1800 3650
 	1    0    0    -1  
 $EndComp
 Text GLabel 4500 2900 0    50   Input ~ 0
 pa6_i2c1_bme680_scl
-Text GLabel 2600 4150 0    50   Input ~ 0
+Text GLabel 2600 4050 0    50   Input ~ 0
 pa6_i2c1_bme680_scl
 Text GLabel 4500 3000 0    50   Input ~ 0
 pa7_i2c1_bme680_sda
-Text GLabel 2600 4050 0    50   Input ~ 0
+Text GLabel 2600 4150 0    50   Input ~ 0
 pa7_i2c1_bme680_sda
 Text GLabel 6100 2200 2    50   Input ~ 0
 pb2_i2c0_rtc_scl
@@ -386,7 +386,7 @@ Wire Wire Line
 Connection ~ 2000 2000
 Wire Wire Line
 	2000 2000 1800 2000
-Text GLabel 7100 950  0    50   Input ~ 0
+Text GLabel 7100 750  0    50   Input ~ 0
 pd6_rtc_int_sqw
 $Comp
 L power:GND #PWR0108
@@ -402,17 +402,17 @@ $EndComp
 $Comp
 L power:+3.3V #PWR0107
 U 1 1 5FD45C2F
-P 6200 600
-F 0 "#PWR0107" H 6200 450 50  0001 C CNN
-F 1 "+3.3V" H 6215 773 50  0000 C CNN
-F 2 "" H 6200 600 50  0001 C CNN
-F 3 "" H 6200 600 50  0001 C CNN
-	1    6200 600 
+P 6200 1000
+F 0 "#PWR0107" H 6200 850 50  0001 C CNN
+F 1 "+3.3V" H 6215 1173 50  0000 C CNN
+F 2 "" H 6200 1000 50  0001 C CNN
+F 3 "" H 6200 1000 50  0001 C CNN
+	1    6200 1000
 	1    0    0    -1  
 $EndComp
-Text GLabel 7100 850  0    50   Input ~ 0
+Text GLabel 7100 950  0    50   Input ~ 0
 pb3_i2c0_rtc_sda
-Text GLabel 7100 750  0    50   Input ~ 0
+Text GLabel 7100 850  0    50   Input ~ 0
 pb2_i2c0_rtc_scl
 $Comp
 L Connector_Generic:Conn_01x06 J5
@@ -426,9 +426,9 @@ F 3 "~" H 7300 850 50  0001 C CNN
 	1    0    0    -1  
 $EndComp
 Wire Wire Line
-	7100 650  6200 650 
+	7100 1050 6200 1050
 Wire Wire Line
-	6200 650  6200 600 
+	6200 1050 6200 1000
 $Comp
 L Connector_Generic:Conn_01x06 J1
 U 1 1 6020DB75
@@ -441,16 +441,8 @@ F 3 "~" H 2800 4050 50  0001 C CNN
 	1    0    0    -1  
 $EndComp
 Wire Wire Line
-	1800 4300 2300 4300
-Wire Wire Line
-	2300 4300 2300 4550
+	1800 3650 2300 3650
 NoConn ~ 2600 4250
-NoConn ~ 7100 1050
-NoConn ~ 2600 3950
-Wire Wire Line
-	2600 4350 2600 4550
-Wire Wire Line
-	2300 4550 2600 4550
 NoConn ~ 2900 1450
 NoConn ~ 2900 1550
 NoConn ~ 2900 1650
@@ -459,4 +451,10 @@ NoConn ~ 2900 1850
 NoConn ~ 3400 1550
 NoConn ~ 3400 1650
 NoConn ~ 3400 1450
+NoConn ~ 7100 650 
+Wire Wire Line
+	2300 3650 2300 3950
+Wire Wire Line
+	2300 3950 2600 3950
+NoConn ~ 2600 4350
 $EndSCHEMATC

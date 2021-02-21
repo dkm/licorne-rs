@@ -386,6 +386,8 @@ mod app {
 
         display: Display2in13,
 
+        display_dirty: bool,
+
         #[cfg(feature = "rtc")]
         rtc_int_pin: PD6<Input<PullUp>>,
 
@@ -571,7 +573,7 @@ mod app {
             .unwrap();
 
             let time = rtc.get_time().unwrap();
-            refresh_time::spawn(time, false).unwrap();
+            refresh_time::spawn(time, true).unwrap();
 
             #[cfg(feature = "testranges")]
             {
@@ -754,6 +756,8 @@ mod app {
             },
 
             display,
+
+            display_dirty: false,
 
             #[cfg(feature = "rtc")]
             rtc_int_pin,
@@ -1077,27 +1081,35 @@ mod app {
 
     #[task(
         priority = 3,
-        resources = [mode, new_time],
+        resources = [mode, new_time, display_dirty],
     )]
     fn refresh_during_configuration(mut ctx: refresh_during_configuration::Context) {
         let scheduled = Instant::now(); // ctx.scheduled;
+
+        let display_need_refresh = ctx.resources.display_dirty.lock(|dd| *dd);
 
         #[cfg(feature = "rtc")]
         let newtime = ctx.resources.new_time.lock(|nt| *nt);
 
         ctx.resources.mode.lock(|mode| {
             if *mode == OperatingMode::Configuration {
-                #[cfg(feature = "rtc")]
-                refresh_time::spawn(newtime, false).unwrap();
+                if display_need_refresh {
+                    #[cfg(feature = "rtc")]
+                    refresh_time::spawn(newtime, false).unwrap();
 
-                refresh_during_configuration::schedule(scheduled + (2 * ONE_SEC).cycles()).unwrap();
+                    #[cfg(feature = "epd")]
+                    refresh_epd::spawn(EPDModeHint::ForcePartial).unwrap();
 
-                #[cfg(feature = "epd")]
-                refresh_epd::spawn(EPDModeHint::ForcePartial).unwrap();
+                    //                    refresh_leds::spawn().unwrap();
+                }
 
-                refresh_leds::spawn().unwrap();
+                refresh_during_configuration::schedule(scheduled + (100 * ONE_MSEC).cycles())
+                    .unwrap();
             }
         });
+        if display_need_refresh {
+            ctx.resources.display_dirty.lock(|dd| *dd = false);
+        }
     }
 
     #[task(
@@ -1211,7 +1223,7 @@ mod app {
     }
 
     #[task(priority = 3,
-           resources =[mode, submode, rotary, rotary_switch, new_time, leds])]
+           resources =[mode, submode, rotary, rotary_switch, new_time, leds, display_dirty])]
     fn rotary_sampling(mut cx: rotary_sampling::Context, first: bool) {
         if first {
             debug_only! {hprintln!("rotary sampling").unwrap()}
@@ -1221,6 +1233,8 @@ mod app {
         #[cfg(feature = "rtc")]
         let mut new_time = cx.resources.new_time.lock(|t| *t);
         let mut new_brightness = cx.resources.leds.lock(|l| l.brightness);
+
+        let mut display_dirty = false;
 
         (
             cx.resources.mode,
@@ -1242,6 +1256,9 @@ mod app {
                         match dir {
                             Direction::Clockwise | Direction::CounterClockwise => {
                                 //                                knob_turned::spawn(dir).unwrap();
+
+                                display_dirty = true;
+
                                 let sign = match dir {
                                     Direction::Clockwise => 1,
                                     Direction::CounterClockwise => -1,
@@ -1297,10 +1314,13 @@ mod app {
                 }
             });
 
-        #[cfg(feature = "rtc")]
-        cx.resources.new_time.lock(|t| *t = new_time);
+        if display_dirty {
+            #[cfg(feature = "rtc")]
+            cx.resources.new_time.lock(|t| *t = new_time);
 
-        cx.resources.leds.lock(|l| l.brightness = new_brightness);
+            cx.resources.leds.lock(|l| l.brightness = new_brightness);
+            cx.resources.display_dirty.lock(|dt| *dt = true);
+        }
     }
 
     // Priority 1 tasks.

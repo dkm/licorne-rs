@@ -1001,7 +1001,11 @@ mod app {
                 refresh_during_configuration::spawn().unwrap();
             }
         }
-        //        refresh_epd::spawn().unwrap();
+
+        // This should be the last thing to do. This is higher prio and
+        // is time expensive
+        #[cfg(feature = "epd")]
+        refresh_epd::spawn(EPDModeHint::ForceFull).unwrap();
     }
 
     #[task(priority = 4, binds = GPIOB, resources = [toggle_switch])]
@@ -1099,7 +1103,11 @@ mod app {
             }
         });
         if display_need_refresh {
-            ctx.resources.display_dirty.lock(|dd| *dd = false);
+            (ctx.resources.display_dirty, ctx.resources.new_time).lock(|dd, nt| {
+                if *nt == newtime {
+                    *dd = false
+                }
+            });
         }
     }
 
@@ -1215,25 +1223,22 @@ mod app {
 
     #[task(priority = 3,
            resources =[mode, submode, rotary, rotary_switch, new_time, leds, display_dirty])]
-    fn rotary_sampling(mut cx: rotary_sampling::Context, first: bool) {
+    fn rotary_sampling(cx: rotary_sampling::Context, first: bool) {
         if first {
             debug_only! {hprintln!("rotary sampling").unwrap()}
         }
         let scheduled = Instant::now(); //cx.scheduled;
 
-        #[cfg(feature = "rtc")]
-        let mut new_time = cx.resources.new_time.lock(|t| *t);
-        let mut new_brightness = cx.resources.leds.lock(|l| l.brightness);
-
-        let mut display_dirty = false;
-
         (
+            cx.resources.leds,
+            cx.resources.display_dirty,
+            cx.resources.new_time,
             cx.resources.mode,
             cx.resources.submode,
             cx.resources.rotary_switch,
             cx.resources.rotary,
         )
-            .lock(|mode, submode, rs, r| {
+            .lock(|l, dirty, new_time, mode, submode, rs, r| {
                 let current_mode = *mode;
 
                 match current_mode {
@@ -1248,7 +1253,7 @@ mod app {
                             Direction::Clockwise | Direction::CounterClockwise => {
                                 //                                knob_turned::spawn(dir).unwrap();
 
-                                display_dirty = true;
+                                *dirty = true;
 
                                 let sign = match dir {
                                     Direction::Clockwise => 1,
@@ -1260,15 +1265,14 @@ mod app {
                                     SubConfig::Hour => chrono::Duration::hours(1 * sign),
                                     SubConfig::Minute => chrono::Duration::minutes(1 * sign),
                                     SubConfig::Brightness => {
-                                        new_brightness =
-                                            (new_brightness as i8 + sign as i8 * 10) as u8;
+                                        l.brightness = (l.brightness as i8 + sign as i8 * 10) as u8;
                                         chrono::Duration::minutes(0)
                                     }
                                 };
 
                                 #[cfg(feature = "rtc")]
                                 {
-                                    new_time = new_time.overflowing_add_signed(add).0;
+                                    *new_time = new_time.overflowing_add_signed(add).0;
                                 }
 
                                 debug_only! {hprintln!("knob turned").unwrap()}
@@ -1304,14 +1308,6 @@ mod app {
                     }
                 }
             });
-
-        if display_dirty {
-            #[cfg(feature = "rtc")]
-            cx.resources.new_time.lock(|t| *t = new_time);
-
-            cx.resources.leds.lock(|l| l.brightness = new_brightness);
-            cx.resources.display_dirty.lock(|dt| *dt = true);
-        }
     }
 
     // Priority 1 tasks.

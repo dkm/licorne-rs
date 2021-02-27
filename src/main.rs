@@ -3,7 +3,6 @@
 #![no_main]
 #![no_std]
 
-//#[macro_use]
 extern crate cortex_m_rt;
 
 extern crate nb;
@@ -429,7 +428,6 @@ mod app {
         // Alias peripherals
         let p: tm4c123x_hal::Peripherals = cx.device;
 
-        //        let p = tm4c123x_hal::Peripherals::take().unwrap();
         let mut sc = p.SYSCTL.constrain();
 
         sc.clock_setup.oscillator = sysctl::Oscillator::Main(
@@ -476,9 +474,6 @@ mod app {
         let rst_pin = portd.pd1.into_push_pull_output();
         let dc_pin = porte.pe4.into_push_pull_output(); // dc
         let busy_pin = porte.pe2.into_floating_input();
-
-        // Cortex-M peripherals
-        // : cortex_m::Peripherals
 
         #[cfg(feature = "bme")]
         let i2c_bme680 = I2c::i2c1(
@@ -985,10 +980,6 @@ mod app {
                         p.set_interrupt_mode(InterruptMode::EdgeFalling);
                     });
                 }
-                // Disable anything comming from rotary switch
-                // ctx.resources.rotary_switch.lock(|rs| {
-                //     rs.pin.set_interrupt_mode(InterruptMode::Disabled);
-                // });
             }
             OperatingMode::Configuration => {
                 #[cfg(feature = "rtc")]
@@ -1291,7 +1282,7 @@ mod app {
                         let pressed: bool = rs.pin.is_low().unwrap();
 
                         let edge = rs.debouncer.update(pressed);
-                        //                        debug_only! {hprintln!("rotary switch status {:?}", pressed).unwrap()}
+
                         // Dispatch event
                         if edge == Some(Edge::Rising) {
                             debug_only! {hprintln!("rotary PRESSED").unwrap()}
@@ -1390,14 +1381,6 @@ mod app {
     //         }
     //     });
     //     refresh_leds::spawn().unwrap();
-    // }
-
-    // #[task(capacity = 10, priority = 1, resources =[rtc, new_time, submode])]
-    // fn knob_turned(cx: knob_turned::Context, dir: Direction) {
-    //     (cx.resources.submode, cx.resources.new_time).lock(|submode, new_time| {
-    //         debug_only! {hprintln!("knob turned {:?} {:?}", dir, submode).unwrap()}
-
-    //     });
     // }
 }
 

@@ -40,8 +40,12 @@ const NUM_LEDS: usize = 3;
 
 const FONT_TIME: embedded_various_fonts::fonts::GNUTypeWriter60Point =
     embedded_various_fonts::fonts::GNUTypeWriter60Point {};
-
 const FONT_RIGHT_BAR: embedded_graphics::fonts::Font12x16 = embedded_graphics::fonts::Font12x16;
+
+const SCR_RANGE_NAME_X_OFF: i32 = 1;
+const SCR_RANGE_NAME_Y_OFF: i32 = 85;
+const FONT_RANGE_NAME: embedded_various_fonts::fonts::GNUTypeWriter18Point =
+    embedded_various_fonts::fonts::GNUTypeWriter18Point {};
 
 const SCR_HOUR_X_OFF: i32 = 1;
 const SCR_HOUR_Y_OFF: i32 = 20;
@@ -291,9 +295,10 @@ mod app {
 
     use crate::{
         draw_config_hint, Bme680T, EPDModeHint, FSMState, LedsT, OperatingMode, RotarySwitchT,
-        RotaryT, RtcT, Screen, SimpleAsmDelay, SubConfig, TimeRange, ToggleSwitchT, FONT_RIGHT_BAR,
-        FONT_TIME, IDLE_COLOR, MAX_NUM_QUICK_REFRESH, NUM_LEDS, RESET_BRIGHTNESS_VALUE,
-        SCR_HOUR_X_OFF, SCR_HOUR_Y_OFF, SCR_RIGHT_BAR_ERRCNT_X_OFF, SCR_RIGHT_BAR_ERRCNT_Y_OFF,
+        RotaryT, RtcT, Screen, SimpleAsmDelay, SubConfig, TimeRange, ToggleSwitchT,
+        FONT_RANGE_NAME, FONT_RIGHT_BAR, FONT_TIME, IDLE_COLOR, MAX_NUM_QUICK_REFRESH, NUM_LEDS,
+        RESET_BRIGHTNESS_VALUE, SCR_HOUR_X_OFF, SCR_HOUR_Y_OFF, SCR_RANGE_NAME_X_OFF,
+        SCR_RANGE_NAME_Y_OFF, SCR_RIGHT_BAR_ERRCNT_X_OFF, SCR_RIGHT_BAR_ERRCNT_Y_OFF,
         SCR_RIGHT_BAR_HUMID_X_OFF, SCR_RIGHT_BAR_HUMID_Y_OFF, SCR_RIGHT_BAR_TEMP_X_OFF,
         SCR_RIGHT_BAR_TEMP_Y_OFF,
     };
@@ -312,7 +317,7 @@ mod app {
         prelude::*, text_style,
     };
 
-    use heapless::{consts::U5, String};
+    use heapless::{consts::U10, consts::U5, String};
 
     use ufmt::uwrite;
 
@@ -609,13 +614,13 @@ mod app {
                         start: NaiveTime::from_hms(20, 0, 0),
                         end: NaiveTime::from_hms(7, 30, 0),
                         in_color: colors::PINK,
-                        name: "night",
+                        name: "nuit",
                     },
                     TimeRange {
                         start: NaiveTime::from_hms(14, 00, 0),
                         end: NaiveTime::from_hms(16, 0, 0),
                         in_color: colors::PINK,
-                        name: "nap",
+                        name: "sieste",
                     },
                 ];
             }
@@ -666,9 +671,8 @@ mod app {
                     debug_only! {hprintln!("In range: {}:{}", range.start, range.end).unwrap()}
 
                     current_color = &range.in_color;
-
                     rtc.set_alarm1_hms(range.end).unwrap();
-
+                    refresh_range_name::spawn(range.name).unwrap();
                     found = true;
                     break;
                 }
@@ -834,6 +838,25 @@ mod app {
                     .unwrap();
             }
             screen.quick_refresh_count += 1;
+        });
+    }
+
+    #[task(priority = 5, resources = [display])]
+    fn refresh_range_name(mut cx: refresh_range_name::Context, name: &'static str) {
+        cx.resources.display.lock(|display| {
+            let mut name_s: String<U10> = String::new();
+            uwrite!(name_s, "{}", name[..core::cmp::min(name.len(), 10)]).unwrap();
+
+            let _ = Text::new(
+                &name_s,
+                Point::new(SCR_RANGE_NAME_X_OFF, SCR_RANGE_NAME_Y_OFF),
+            )
+            .into_styled(text_style!(
+                font = FONT_RANGE_NAME,
+                text_color = Black,
+                background_color = White
+            ))
+            .draw(display);
         });
     }
 
@@ -1160,7 +1183,7 @@ mod app {
                     debug_only! {hprintln!("Enter").unwrap()}
 
                     transition_leds::spawn(ranges[*range].in_color, TRANSITION_STEPS).unwrap();
-
+                    refresh_range_name::spawn(ranges[*range].name).unwrap();
                     debug_only! {hprintln!("Alarm :{}", ranges[*range].end).unwrap()}
                     rtc.set_alarm1_hms(ranges[*range].end).unwrap();
 
@@ -1171,7 +1194,7 @@ mod app {
                     debug_only! {hprintln!("Exit").unwrap()}
 
                     transition_leds::spawn(IDLE_COLOR, 50).unwrap();
-
+                    refresh_range_name::spawn("          ").unwrap();
                     if *range == ranges.len() - 1 {
                         rtc.set_alarm1_hms(ranges[0].start).unwrap();
                         Some(FSMState::WaitNextRange(0))

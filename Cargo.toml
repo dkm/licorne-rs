@@ -41,11 +41,11 @@ cortex-m = "0.7"
 
 cortex-m-semihosting = "0.3"
 panic-semihosting = "0.5"
-##panic-halt = "0.2.0"
+
 smart-leds = "0.3"
 
 ## Waiting for next release with 2in13 support
-epd-waveshare = {git = "https://github.com/caemor/epd-waveshare.git", rev="87e63741ef9335439d97f587a781630077be2515" }
+epd-waveshare = {git = "https://github.com/caemor/epd-waveshare.git", branch = "main" }
 embedded-graphics = "0.6"
 cortex-m-rtic = { git = "https://github.com/rtic-rs/cortex-m-rtic" }
 

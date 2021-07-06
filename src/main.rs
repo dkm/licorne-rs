@@ -26,11 +26,21 @@ use embedded_hal::{
 };
 
 use embedded_graphics::{
-    fonts::Text, pixelcolor::BinaryColor::Off as White, pixelcolor::BinaryColor::On as Black,
-    prelude::*, text_style,
+    text::{Baseline, Text, TextStyleBuilder},
+    mono_font::{
+        MonoTextStyleBuilder,
+    },
+    prelude::*,
 };
 
-use epd_waveshare::epd2in13_v2::{Display2in13, EPD2in13};
+use epd_waveshare::{
+    epd2in13_v2::{
+        Display2in13,
+        Epd2in13
+    },
+    color::*,
+    prelude::*,
+};
 
 use smart_leds::{colors, RGB8};
 
@@ -38,14 +48,14 @@ const RESET_BRIGHTNESS_VALUE: u8 = 30u8;
 const IDLE_COLOR: RGB8 = colors::GREEN;
 const NUM_LEDS: usize = 3;
 
-const FONT_TIME: embedded_various_fonts::fonts::GNUTypeWriter60Point =
-    embedded_various_fonts::fonts::GNUTypeWriter60Point {};
-const FONT_RIGHT_BAR: embedded_graphics::fonts::Font12x16 = embedded_graphics::fonts::Font12x16;
+const FONT_TIME: embedded_graphics::mono_font::MonoFont =
+    embedded_various_fonts::fonts::GNUTYPEWRITER_60_POINT;
+const FONT_RIGHT_BAR: embedded_graphics::mono_font::MonoFont = embedded_graphics::mono_font::ascii::FONT_7X13;
 
 const SCR_RANGE_NAME_X_OFF: i32 = 1;
 const SCR_RANGE_NAME_Y_OFF: i32 = 85;
-const FONT_RANGE_NAME: embedded_various_fonts::fonts::GNUTypeWriter18Point =
-    embedded_various_fonts::fonts::GNUTypeWriter18Point {};
+const FONT_RANGE_NAME: embedded_graphics::mono_font::MonoFont =
+    embedded_various_fonts::fonts::GNUTYPEWRITER_18_POINT;
 
 const SCR_HOUR_X_OFF: i32 = 1;
 const SCR_HOUR_Y_OFF: i32 = 20;
@@ -59,7 +69,7 @@ const SCR_RIGHT_BAR_HUMID_Y_OFF: i32 = 18 + SCR_RIGHT_BAR_TEMP_Y_OFF;
 const SCR_RIGHT_BAR_ERRCNT_X_OFF: i32 = 200;
 const SCR_RIGHT_BAR_ERRCNT_Y_OFF: i32 = 18 + SCR_RIGHT_BAR_HUMID_Y_OFF;
 
-const FONT_CONFIG: embedded_graphics::fonts::Font12x16 = embedded_graphics::fonts::Font12x16;
+const FONT_CONFIG: embedded_graphics::mono_font::MonoFont = embedded_graphics::mono_font::ascii::FONT_7X13;
 const SCR_CONFIG_X_OFF: i32 = 200;
 const SCR_CONFIG_Y_OFF: i32 = 100;
 
@@ -209,12 +219,13 @@ pub enum EPDModeHint {
     ForcePartial,
 }
 
-pub type EpdT = EPD2in13<
+pub type EpdT = Epd2in13<
     Spi0T,
     PC6<Output<PushPull>>,
     PE2<Input<Floating>>,
     PE4<Output<PushPull>>,
     PD1<Output<PushPull>>,
+    SimpleAsmDelay,
 >;
 
 type RotaryT = Rotary<PB1<Input<PullUp>>, PB4<Input<PullUp>>>;
@@ -290,7 +301,7 @@ type ToggleSwitchT = Switch<ToggleSwitchPinT>;
 type RotarySwitchPinT = PC4<Input<PullUp>>;
 type RotarySwitchT = Switch<RotarySwitchPinT>;
 
-#[rtic::app(device = tm4c123x_hal::pac, peripherals = true, monotonic = rtic::cyccnt::CYCCNT, dispatchers = [UART1, UART2, UART3, UART4])]
+#[rtic::app(device = tm4c123x_hal::pac, peripherals = true, dispatchers = [UART1, UART2, UART3, UART4])]
 mod app {
 
     use crate::{
@@ -302,7 +313,7 @@ mod app {
         SCR_RIGHT_BAR_HUMID_X_OFF, SCR_RIGHT_BAR_HUMID_Y_OFF, SCR_RIGHT_BAR_TEMP_X_OFF,
         SCR_RIGHT_BAR_TEMP_Y_OFF,
     };
-    use rtic::cyccnt::Instant;
+//    use rtic::cyccnt::Instant;
 
     use tm4c123x_hal::{
         gpio::{gpiod::PD6, Floating, GpioExt, Input, InterruptMode, PullUp, AF2, AF3},
@@ -313,15 +324,19 @@ mod app {
     };
 
     use embedded_graphics::{
-        fonts::Text, pixelcolor::BinaryColor::Off as White, pixelcolor::BinaryColor::On as Black,
-        prelude::*, text_style,
+        text::{Baseline, Text, TextStyleBuilder},
+        mono_font::{
+            MonoTextStyleBuilder,
+        },
+        prelude::*,
     };
 
     use heapless::{consts::U10, consts::U5, String};
 
     use ufmt::uwrite;
 
-    use rtic::cyccnt::U32Ext as _;
+//    use rtic::cyccnt::U32Ext as _;
+    use rtic::time::duration::{Microseconds, Milliseconds};
 
     use drogue_bme680::{Address, Bme680Controller, Bme680Sensor, Configuration, StaticProvider};
 
@@ -335,10 +350,12 @@ mod app {
 
     use cortex_m::peripheral::DWT;
     use epd_waveshare::{
-        epd2in13_v2::{Display2in13, EPD2in13},
+        color::*,
+        epd2in13_v2::{Display2in13, Epd2in13},
         graphics::{Display, DisplayRotation},
         prelude::*,
     };
+    use dwt_systick_monotonic::DwtSystick;
 
     use ds323x::{Alarm2Matching, DayAlarm2, Ds323x, Hours, NaiveTime, Rtcc, Timelike};
 
@@ -363,17 +380,18 @@ mod app {
     }
 
     // Runnig at 80Mhz
-    const ONE_MUSEC: u32 = 80;
-    const ONE_MSEC: u32 = ONE_MUSEC * 1000;
-    const ONE_SEC: u32 = ONE_MSEC * 1000;
+    // const ONE_MUSEC: u32 = 80;
+    // const ONE_MSEC: u32 = ONE_MUSEC * 1000;
+    // const ONE_SEC: u32 = ONE_MSEC * 1000;
 
     const TRANSITION_STEPS: u32 = 50;
-    const TRANSITION_STEP_CYCLES: u32 = (1000 / TRANSITION_STEPS) * ONE_MSEC;
+    // const TRANSITION_STEP_CYCLES: u32 = (1000 / TRANSITION_STEPS) * ONE_MSEC;
+    const TRANSITION_STEP_MSEC: u32 = 1000;
 
     // At 80Mhz, this is ~1ms
-    const POLL_SWITCH_PERIOD: u32 = 10 * ONE_MUSEC;
+    const POLL_SWITCH_PERIOD_MUSEC: u32 = 10;
     const DEBOUNCE_SAMPLE_CNT: i8 = 20;
-    const ROTARY_SAMPLING_PERIOD: u32 = 10 * ONE_MUSEC;
+    const ROTARY_SAMPLING_PERIOD_MUSEC : u32 = 10;
 
     #[resources]
     struct Resources {
@@ -422,13 +440,21 @@ mod app {
         state: FSMState,
     }
 
+    const MONO_HZ: u32 = 80_000_000; // 8 MHz
+    #[monotonic(binds = SysTick, default = true)]
+    type MyMono = DwtSystick<MONO_HZ>;
+
     #[init]
-    fn init(mut cx: init::Context) -> init::LateResources {
+    fn init(mut cx: init::Context) -> (init::LateResources, init::Monotonics) {
         // Initialize (enable) the monotonic timer (CYCCNT)
-        cx.core.DCB.enable_trace();
+        //        cx.core.DCB.enable_trace();
         // required on Cortex-M7 devices that software lock the DWT (e.g. STM32F7)
-        DWT::unlock();
-        cx.core.DWT.enable_cycle_counter();
+        //        DWT::unlock();
+        //        cx.core.DWT.enable_cycle_counter();
+        let mut dcb = cx.core.DCB;
+        let dwt = cx.core.DWT;
+        let systick = cx.core.SYST;
+        let mono = DwtSystick::new(&mut dcb, dwt, systick, 80_000_000);
 
         // Alias peripherals
         let p: tm4c123x_hal::Peripherals = cx.device;
@@ -510,12 +536,12 @@ mod app {
 
         #[cfg(feature = "epd")]
         let mut epd =
-            EPD2in13::new(&mut spi0, cs_pin, busy_pin, dc_pin, rst_pin, &mut delay).unwrap();
+            Epd2in13::new(&mut spi0, cs_pin, busy_pin, dc_pin, rst_pin, &mut delay).unwrap();
 
         let mut display = Display2in13::default();
 
         display.set_rotation(DisplayRotation::Rotate90);
-        display.clear(White).unwrap();
+        display.clear_buffer(Color::White);
 
         let spi_ws2812 = Spi::spi1(
             p.SSI1,
@@ -693,12 +719,12 @@ mod app {
             }
 
             #[cfg(feature = "epd")]
-            epd.update_and_display_frame(&mut spi0, &display.buffer())
+            epd.update_and_display_frame(&mut spi0, &display.buffer(), &mut delay)
                 .unwrap();
 
             // enable partial refresh from now on
             #[cfg(feature = "epd")]
-            epd.set_refresh(&mut spi0, &mut delay, RefreshLUT::QUICK)
+            epd.set_refresh(&mut spi0, &mut delay, RefreshLut::Quick)
                 .unwrap();
         }
 
@@ -739,7 +765,7 @@ mod app {
                 .unwrap()
         }
 
-        init::LateResources {
+        (init::LateResources {
             mode: OperatingMode::Normal,
             submode: SubConfig::Hour,
 
@@ -787,7 +813,8 @@ mod app {
 
             toggle_switch,
             rotary_switch,
-        }
+        },
+         init::Monotonics(mono))
     }
 
     // TOP Priority task.
@@ -807,34 +834,43 @@ mod app {
             let mut errcnt_s: String<U5> = String::new();
             uwrite!(errcnt_s, "#{}", screen.quick_refresh_count).unwrap();
 
-            let _ = Text::new(
+            let text_style = TextStyleBuilder::new().baseline(Baseline::Top).build();
+            let style = MonoTextStyleBuilder::new()
+                .font(&FONT_RIGHT_BAR)
+                .text_color(Black)
+                .background_color(White)
+                .build();
+
+            let _ = Text::with_text_style(
                 &errcnt_s,
                 Point::new(SCR_RIGHT_BAR_ERRCNT_X_OFF, SCR_RIGHT_BAR_ERRCNT_Y_OFF + 16),
+                style,
+                text_style,
             )
-            .into_styled(text_style!(
-                font = FONT_RIGHT_BAR,
-                text_color = Black,
-                background_color = White
-            ))
+            // .into_styled(text_style!(
+            //     font = FONT_RIGHT_BAR,
+            //     text_color = Black,
+            //     background_color = White
+            // ))
             .draw(display);
 
             if do_full_refresh {
                 screen.quick_refresh_count = 0;
                 screen
                     .epd
-                    .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLUT::FULL)
+                    .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLut::Full)
                     .unwrap();
             }
 
             screen
                 .epd
-                .update_and_display_frame(&mut screen.spi, &display.buffer())
+                .update_and_display_frame(&mut screen.spi, &display.buffer(), &mut screen.delay)
                 .unwrap();
 
             if do_full_refresh {
                 screen
                     .epd
-                    .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLUT::QUICK)
+                    .set_refresh(&mut screen.spi, &mut screen.delay, RefreshLut::Quick)
                     .unwrap();
             }
             screen.quick_refresh_count += 1;
@@ -847,15 +883,24 @@ mod app {
             let mut name_s: String<U10> = String::new();
             uwrite!(name_s, "{}", name[..core::cmp::min(name.len(), 10)]).unwrap();
 
-            let _ = Text::new(
+            let text_style = TextStyleBuilder::new().baseline(Baseline::Top).build();
+            let style = MonoTextStyleBuilder::new()
+                .font(&FONT_RANGE_NAME)
+                .text_color(Black)
+                .background_color(White)
+                .build();
+
+            let _ = Text::with_text_style(
                 &name_s,
                 Point::new(SCR_RANGE_NAME_X_OFF, SCR_RANGE_NAME_Y_OFF),
+                style,
+                text_style
             )
-            .into_styled(text_style!(
-                font = FONT_RANGE_NAME,
-                text_color = Black,
-                background_color = White
-            ))
+            // .into_styled(text_style!(
+            //     font = FONT_RANGE_NAME,
+            //     text_color = Black,
+            //     background_color = White
+            // ))
             .draw(display);
         });
     }
@@ -918,40 +963,53 @@ mod app {
             )
                 .unwrap();
 
-            let _ = Text::new(
+            let text_style = TextStyleBuilder::new().baseline(Baseline::Top).build();
+            let style = MonoTextStyleBuilder::new()
+                .font(&FONT_RIGHT_BAR)
+                .text_color(Black)
+                .background_color(White)
+                .build();
+
+            let _ = Text::with_text_style(
                 &temp_s,
                 Point::new(SCR_RIGHT_BAR_TEMP_X_OFF, SCR_RIGHT_BAR_TEMP_Y_OFF),
+                style,
+                text_style
             )
-                .into_styled(text_style!(
-                    font = FONT_RIGHT_BAR,
-                    text_color = Black,
-                    background_color = White
-                ))
+            // .into_styled(text_style!(
+            //     font = FONT_RIGHT_BAR,
+            //     text_color = Black,
+            //     background_color = White
+            // ))
                 .draw(display);
 
-            let _ = Text::new(
+            let _ = Text::with_text_style(
                 &humid_s,
                 Point::new(SCR_RIGHT_BAR_HUMID_X_OFF, SCR_RIGHT_BAR_HUMID_Y_OFF),
+                style,
+                text_style
             )
-                .into_styled(text_style!(
-                    font = FONT_RIGHT_BAR,
-                    text_color = Black,
-                    background_color = White
-                ))
+                // .into_styled(text_style!(
+                //     font = FONT_RIGHT_BAR,
+                //     text_color = Black,
+                //     background_color = White
+                // ))
                 .draw(display);
 
             let mut errcnt_s: String<U5> = String::new();
             uwrite!(errcnt_s, "#{}", cur_i2c_error).unwrap();
 
-            let _ = Text::new(
+            let _ = Text::with_text_style(
                 &errcnt_s,
                 Point::new(SCR_RIGHT_BAR_ERRCNT_X_OFF, SCR_RIGHT_BAR_ERRCNT_Y_OFF),
+                style,
+                text_style,
             )
-                .into_styled(text_style!(
-                    font = FONT_RIGHT_BAR,
-                    text_color = Black,
-                    background_color = White
-                ))
+                // .into_styled(text_style!(
+                //     font = FONT_RIGHT_BAR,
+                //     text_color = Black,
+                //     background_color = White
+                // ))
                 .draw(display);
         });
         if refresh_epd {
@@ -1102,7 +1160,7 @@ mod app {
         resources = [mode, new_time, display_dirty],
     )]
     fn refresh_during_configuration(mut ctx: refresh_during_configuration::Context) {
-        let scheduled = Instant::now(); // ctx.scheduled;
+//        let scheduled = Instant::now(); // ctx.scheduled;
 
         let display_need_refresh = ctx.resources.display_dirty.lock(|dd| *dd);
 
@@ -1121,8 +1179,8 @@ mod app {
                     //                    refresh_leds::spawn().unwrap();
                 }
 
-                refresh_during_configuration::schedule(scheduled + (100 * ONE_MSEC).cycles())
-                    .unwrap();
+                refresh_during_configuration::spawn_after(Milliseconds(100u32)).ok();
+
             }
         });
         if display_need_refresh {
@@ -1144,7 +1202,7 @@ mod app {
         }
 
         // Poll button
-        let scheduled = Instant::now(); // ctx.scheduled;
+//        let scheduled = Instant::now(); // ctx.scheduled;
 
         ctx.resources.toggle_switch.lock(|ts| {
             let pressed = ts.pin.is_high().unwrap();
@@ -1163,7 +1221,7 @@ mod app {
                 change_mode::spawn(OperatingMode::Normal).unwrap();
             } else if ts.sample_count > 0 {
                 // Re-schedule the timer interrupt to get enough samples
-                poll_toggle_switch::schedule(scheduled + POLL_SWITCH_PERIOD.cycles(), false).unwrap();
+                poll_toggle_switch::spawn_after( Microseconds(POLL_SWITCH_PERIOD_MUSEC), false).ok();
             } else {
                 debug_only! {hprintln!("nothing ? {:?} {:?}", pressed, ts.pin.is_high().unwrap()).unwrap()}
                 ts.sample_count = -1;
@@ -1228,13 +1286,19 @@ mod app {
             .unwrap();
 
             //            debug_only! {hprintln!("refresh time with: {}", hhmm).unwrap()}
+            let text_style = TextStyleBuilder::new().baseline(Baseline::Top).build();
+            let style = MonoTextStyleBuilder::new()
+                .font(&FONT_TIME)
+                .text_color(Black)
+                .background_color(White)
+                .build();
 
-            let _ = Text::new(&hhmm, Point::new(SCR_HOUR_X_OFF as i32, SCR_HOUR_Y_OFF))
-                .into_styled(text_style!(
-                    font = FONT_TIME,
-                    text_color = Black,
-                    background_color = White
-                ))
+            let _ = Text::with_text_style(&hhmm, Point::new(SCR_HOUR_X_OFF as i32, SCR_HOUR_Y_OFF), style, text_style)
+                // .into_styled(text_style!(
+                //     font = FONT_TIME,
+                //     text_color = Black,
+                //     background_color = White
+                // ))
                 .draw(display);
         });
 
@@ -1250,7 +1314,7 @@ mod app {
         if first {
             debug_only! {hprintln!("rotary sampling").unwrap()}
         }
-        let scheduled = Instant::now(); //cx.scheduled;
+//        let scheduled = Instant::now(); //cx.scheduled;
 
         (
             cx.resources.leds,
@@ -1323,11 +1387,11 @@ mod app {
                         }
 
                         // Continue sampling
-                        rotary_sampling::schedule(
-                            scheduled + ROTARY_SAMPLING_PERIOD.cycles(),
+                        rotary_sampling::spawn_after(
+                            Microseconds(ROTARY_SAMPLING_PERIOD_MUSEC),
                             false,
                         )
-                        .unwrap();
+                        .ok();
                     }
                 }
             });
@@ -1360,13 +1424,12 @@ mod app {
         });
 
         if trans_step > 1 {
-            transition_leds::schedule(
-                Instant::now() // cx.scheduled
-                    + TRANSITION_STEP_CYCLES.cycles(),
+            transition_leds::spawn_after(
+                Milliseconds(TRANSITION_STEP_MSEC),
                 to,
                 trans_step - 1,
             )
-            .unwrap();
+            .ok();
         }
         refresh_leds::spawn().unwrap();
     }
@@ -1405,12 +1468,18 @@ mod app {
 
 fn draw_config_hint(display: &mut Display2in13, is_config: bool) {
     let text = if is_config { "C" } else { " " };
+    let text_style = TextStyleBuilder::new().baseline(Baseline::Top).build();
+    let style = MonoTextStyleBuilder::new()
+        .font(&FONT_CONFIG)
+        .text_color(Black)
+        .background_color(White)
+        .build();
 
-    let _ = Text::new(text, Point::new(SCR_CONFIG_X_OFF, SCR_CONFIG_Y_OFF))
-        .into_styled(text_style!(
-            font = FONT_CONFIG,
-            text_color = Black,
-            background_color = White
-        ))
+    let _ = Text::with_text_style(text, Point::new(SCR_CONFIG_X_OFF, SCR_CONFIG_Y_OFF), style, text_style)
+        // .into_styled(text_style!(
+        //     font = FONT_CONFIG,
+        //     text_color = Black,
+        //     background_color = White
+        // ))
         .draw(display);
 }

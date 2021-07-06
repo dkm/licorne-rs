@@ -46,13 +46,17 @@ smart-leds = "0.3"
 
 ## Waiting for next release with 2in13 support
 epd-waveshare = {git = "https://github.com/caemor/epd-waveshare.git", branch = "main" }
-embedded-graphics = "0.6"
+embedded-graphics = "0.7"
 cortex-m-rtic = { git = "https://github.com/rtic-rs/cortex-m-rtic" }
 
 bme680 = { version = "0.5", optional = true }
 
 drogue-bme680 = { git = "https://github.com/dkm/drogue-bme680.git", branch = "main" }
 embedded-time = { version = "0.10" }
+
+[dependencies.dwt-systick-monotonic]
+version = "0.1.0-alpha.2"
+
 
 [dependencies.heapless]
 version = "0.5"

@@ -79,7 +79,7 @@ version = "0.2"
 features = ["unproven"]
 
 [features]
-default = [ ]
+default = [ "epd", "bme", "rtc" ]
 
 ## This will use semihosting for printing debug trace.
 usesemihosting = [ "default" ]
